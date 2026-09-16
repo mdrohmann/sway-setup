@@ -1,0 +1,9 @@
+#!/bin/sh
+# Show the focused window's identity, so you can write `for_window` rules.
+swaymsg -t get_tree \
+    | jq -r 'recurse(.nodes[]?, .floating_nodes[]?)
+             | select(.focused == true)
+             | "app_id:  \(.app_id // "-")\nclass:   \(.window_properties.class // "-")\ntitle:   \(.name // "-")"' \
+    | { body=$(cat); notify-send -a sway -u low -t 8000 \
+            -h string:x-dunst-stack-tag:window-identity \
+            "Window identity" "$body"; }

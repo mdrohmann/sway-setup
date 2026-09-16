@@ -1,0 +1,81 @@
+#!/bin/sh
+# Open a terminal with a fixed, memorable name, e.g. "brave otter - ~/ion/core".
+#
+# The point is $mod+o (rofi -show window), which lists windows by title. Left to
+# itself every foot window is titled "martin@host: ~" by the precmd hook in
+# ~/.zshrc, so the picker gives no help predicting where you'll land. A stable
+# adjective-animal name makes it a map you can learn.
+#
+# The title is locked with `-o main.locked-title=yes`, so nothing running inside
+# can rewrite it -- not the zsh hook, not nvim, not Claude Code. That is the
+# whole trade: names that never drift, at the cost of in-terminal context.
+# $mod+Shift+Return opens an ordinary foot when you want the dynamic title back.
+#
+# Locking is per-launch rather than a foot.ini setting, so every other foot on
+# the system -- waybar's `foot -e htop`, anything started by hand -- is untouched.
+
+SEP=' - '
+
+# Short and phonetically distinct, so a name is easy to recall and easy to type
+# as a rofi filter. 20 x 30 = 600 combinations, far more than there will ever be
+# windows, which keeps the collision retry below from mattering in practice.
+ADJECTIVES='brave calm clever eager fierce gentle happy jolly keen lucky
+merry noble proud quick quiet royal sleepy swift wise zesty'
+ANIMALS='badger beaver bison cobra crane dingo eagle falcon ferret gecko
+heron ibex jackal koala lemur lynx marten newt otter panda quail raven
+seal stork tapir turtle viper walrus weasel zebra'
+
+# The focused foot window's shell cwd, so a new terminal opens where you already
+# are. sway's own `exec` runs from sway's cwd (~), which would make every title
+# read "- ~" and the cwd half of the name useless.
+focused_cwd() {
+    pid=$(swaymsg -t get_tree 2>/dev/null \
+          | jq -r 'recurse(.nodes[]?, .floating_nodes[]?)
+                   | select(.focused == true and .app_id == "foot")
+                   | .pid // empty')
+    [ -n "$pid" ] || return 1
+    # foot's direct child is the shell; its cwd is the prompt's cwd even when a
+    # program like nvim is in the foreground, which is what we want.
+    for child in $(pgrep -P "$pid" 2>/dev/null); do
+        dir=$(readlink "/proc/$child/cwd" 2>/dev/null) || continue
+        [ -d "$dir" ] && { printf '%s\n' "$dir"; return 0; }
+    done
+    return 1
+}
+
+# Names already on screen, so two windows never share one. Titles of every foot
+# window, truncated at the separator.
+names_in_use() {
+    swaymsg -t get_tree 2>/dev/null \
+        | jq -r 'recurse(.nodes[]?, .floating_nodes[]?)
+                 | select(.app_id == "foot")
+                 | .name // empty' \
+        | sed "s/$SEP.*//"
+}
+
+pick() {  # pick "$list" -- one random word
+    printf '%s\n' "$1" | tr ' ' '\n' | grep -v '^$' | shuf -n 1
+}
+
+cwd=$(focused_cwd) || cwd=$HOME
+[ -d "$cwd" ] || cwd=$HOME
+
+used=$(names_in_use)
+
+# Retry on collision; after enough tries the pool is either genuinely exhausted
+# or shuf is unlucky, so disambiguate with a counter rather than looping forever.
+n=0
+while [ "$n" -lt 50 ]; do
+    name="$(pick "$ADJECTIVES") $(pick "$ANIMALS")"
+    printf '%s\n' "$used" | grep -qxF "$name" || break
+    n=$(( n + 1 ))
+done
+[ "$n" -lt 50 ] || name="$name $$"
+
+case "$cwd" in
+    "$HOME")   short='~' ;;
+    "$HOME"/*) short="~${cwd#"$HOME"}" ;;
+    *)         short=$cwd ;;
+esac
+
+exec foot -o main.locked-title=yes -T "$name$SEP$short" -D "$cwd"

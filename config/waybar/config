@@ -1,0 +1,217 @@
+// Waybar config -- a port of the swaybar `bar { }` block that used to live in
+// ~/.config/sway/config (kept there, commented out, if you want to revert).
+//
+// Parity notes: swaybar showed workspace buttons, the binding-mode indicator
+// ($mod+r "resize"), a ticking clock and the tray. All four are below,
+// plus a battery indicator that swaybar never had.
+// Styling lives in style.css. Reload with `killall -SIGUSR2 waybar`.
+{
+    "layer": "top",
+    "position": "top",
+
+    "modules-left": ["sway/workspaces", "sway/mode"],
+    "modules-center": [],
+    "modules-right": ["custom/pomodoro", "custom/claude", "custom/slack", "custom/gmail",
+                      "privacy",
+                      "cpu", "memory", "temperature", "bluetooth", "tray",
+                      "battery", "clock"],
+
+    "sway/workspaces": {
+        // Per-output workspaces, as swaybar did. Scrolling over the module
+        // switches workspaces, matching swaybar's wheel behaviour.
+        "all-outputs": false
+    },
+
+    "sway/mode": {
+        // Shows "resize" while you're in the resize binding mode.
+        "format": "{}"
+    },
+
+    "custom/pomodoro": {
+        // A timer read as a ripening tomato: seedling, leafy plant, tomato,
+        // thirty fade steps across the session, then blinking once it's up.
+        // Logic and the JSON contract live in ~/.local/bin/pomodoro, and the
+        // session length in ~/.config/pomodoro.conf; the pomo-* classes it
+        // emits are styled in style.css.
+        //
+        // interval 1 does double duty: it drives the 1 Hz blink, and it means a
+        // press of $mod+t shows up within a second without any SIGRTMIN wiring.
+        // Same poll rate the clock already runs at.
+        "exec": "$HOME/.local/bin/pomodoro waybar",
+        "return-type": "json",
+        "interval": 1,
+        "on-click": "$HOME/.local/bin/pomodoro toggle",
+        "on-click-middle": "$HOME/.local/bin/pomodoro stop",
+        "on-click-right": "$HOME/.local/bin/pomodoro reset"
+    },
+
+    "custom/claude": {
+        // How many Claude Code sessions have finished and are waiting on you.
+        // Source is ~/.claude/sessions/<PID>.json, which Claude Code maintains;
+        // ~/.local/bin/claude-sessions does the reading. Clicking opens the same
+        // picker as $mod+g, which focuses the terminal hosting the one you choose.
+        //
+        // This path reads only those small per-PID files -- never a transcript,
+        // and never the sway tree -- so a 5s poll costs a few milliseconds.
+        "exec": "$HOME/.local/bin/claude-sessions waybar",
+        "return-type": "json",
+        "interval": 5,
+        "on-click": "$HOME/.local/bin/claude-sessions menu"
+    },
+
+    "custom/slack": {
+        // Mentions and DMs waiting in Slack. Read from the window title, which
+        // is the only handle a browser gives without touching the Slack API:
+        // Slack prefixes "!" for things addressed to you and appends
+        // "N new items". Ordinary unread ("*") is deliberately not counted.
+        // U+F198 fa-slack, which the FontAwesome in the font stack does have.
+        //
+        // Reliable only because Slack runs as its own Chrome app window -- as a
+        // tab, the title would be whatever tab happened to be in front.
+        // Clicking toggles it, and launches it when it is not running.
+        "exec": "$HOME/.local/bin/slack waybar",
+        "return-type": "json",
+        "interval": 3,
+        "on-click": "$HOME/.local/bin/slack toggle"
+    },
+
+    "custom/gmail": {
+        // Unread mail, read from the window title the same way custom/slack is
+        // -- and placed right after it, so the "something wants you" cluster
+        // stays contiguous and Slack's position in the bar does not move.
+        //
+        // One thing differs from Slack, and it is why the script keeps a cache:
+        // Gmail's title only carries the count while the window is SHOWING the
+        // inbox ("Inbox (12) - ... - Gmail"). Open a message and the count is
+        // gone from the title entirely, so the module shows the last number it
+        // was told, dimmed via .gmail-stale, and the tooltip says so.
+        //
+        // escape handles Pango entities: a subject line with a & or a < in it
+        // would otherwise be dropped by the markup parser. The JSON quoting is
+        // the script's job -- it builds its output with jq for that reason.
+        "exec": "$HOME/.local/bin/webapp gmail waybar",
+        "return-type": "json",
+        "interval": 3,
+        "escape": true,
+        "on-click": "$HOME/.local/bin/webapp gmail toggle"
+    },
+
+    "privacy": {
+        // Reads pipewire nodes. Dependable for the microphone and for screen
+        // sharing via the portal. A webcam opened directly through V4L2 -- as
+        // plenty of apps still do -- never touches pipewire and so will NOT
+        // show up here; treat this as a mic/screencast light, not a camera one.
+        // "audio-out" is deliberately left out: it would light up for any sound.
+        "icon-size": 14,
+        "icon-spacing": 8,
+        "transition-duration": 0,        // theme reset at the top strips animations
+        "modules": [
+            { "type": "screenshare", "tooltip": true, "tooltip-icon-size": 24 },
+            { "type": "audio-in",    "tooltip": true, "tooltip-icon-size": 24 }
+        ]
+    },
+
+    "cpu": {
+        // waybar-cpu(5) documents no tooltip-format, so anything you want to
+        // read has to be in `format`. {load} is the 1-minute load average.
+        // U+F2DB microchip.
+        "interval": 5,
+        "format": "{usage}% ",
+        "states": {
+            "warning": 70,
+            "critical": 90
+        },
+        "on-click": "foot -e htop"
+    },
+
+    "memory": {
+        // Also no tooltip-format for this module; its built-in tooltip already
+        // reports used/total. U+F233 (server) stands in for RAM because
+        // FontAwesome 4.7 has no memory glyph -- fa-memory is 5-only, and
+        // nothing installed here provides U+F538.
+        "interval": 10,
+        "format": "{percentage}% ",
+        "states": {
+            "warning": 75,
+            "critical": 90
+        },
+        "on-click": "foot -e htop"
+    },
+
+    "temperature": {
+        // hwmonN numbering is not stable across reboots (coretemp happens to be
+        // hwmon8 right now), so name the device path and let waybar locate the
+        // hwmon child itself. temp1_input is "Package id 0" -- the whole-package
+        // reading, rather than one core.
+        "hwmon-path-abs": "/sys/devices/platform/coretemp.0/hwmon",
+        "input-filename": "temp1_input",
+        "interval": 10,
+        "warning-threshold": 75,
+        "critical-threshold": 90,
+        "format": "{temperatureC}°C {icon}",
+        // U+F2CB empty -> U+F2C7 full.
+        "format-icons": ["", "", "", "", ""],
+        "tooltip-format": "CPU package: {temperatureC}°C ({temperatureF}°F)"
+    },
+
+    "bluetooth": {
+        // U+F293 for a live adapter, U+F294 when it is off or blocked.
+        // {device_battery_percentage} only renders for devices that report one,
+        // which is why the battery variants of the enumerate formats exist.
+        "format": "",
+        "format-off": "",
+        "format-disabled": "",
+        "format-connected": " {num_connections}",
+        "tooltip-format": "{controller_alias}\n{status}",
+        "tooltip-format-connected": "{controller_alias}\n{status}\n\n{device_enumerate}",
+        "tooltip-format-enumerate-connected": "{device_alias}\t{device_address}",
+        "tooltip-format-enumerate-connected-battery": "{device_alias}\t{device_battery_percentage}%",
+        "on-click": "foot -e bluetoothctl"
+    },
+
+    "tray": {
+        // The reason for the switch: waybar links libdbusmenu-gtk3, so
+        // right-clicking nm-applet actually opens its menu.
+        "icon-size": 16,
+        "spacing": 8      // swaybar's `tray_padding 4`, doubled for the gap
+    },
+
+    "battery": {
+        // BAT0 exposes energy_now and power_now alongside capacity, so waybar
+        // can derive {time} (remaining, or until full while charging) and the
+        // draw in watts for the tooltip.
+        "interval": 30,
+
+        // Each threshold adds a CSS class at that capacity or below, styled in
+        // style.css. critical wins over warning where they overlap.
+        "states": {
+            "warning": 30,
+            "critical": 15
+        },
+
+        // Glyphs are FontAwesome 4 private-use codepoints; the family is added
+        // to the font stack in style.css so they don't render as tofu.
+        "format": "{capacity}% {icon}",
+
+        // Per-status overrides. The suffix is the lowercased contents of
+        // /sys/class/power_supply/BAT0/status -- hence the space in the third
+        // one. There is no "format-plugged"; that state reports as "Full" or
+        // "Not charging" depending on where charging stopped.
+        "format-charging": "{capacity}% ",
+        "format-full": "{capacity}% ",
+        "format-not charging": "{capacity}% ",
+
+        // Selected by capacity, low to high: U+F244 empty -> U+F240 full.
+        "format-icons": ["", "", "", "", ""],
+
+        "format-time": "{H} h {M} min",
+        "tooltip-format": "{capacity}%  --  {time}\n{power:.1f} W  |  health {health}%  |  {cycles} cycles"
+    },
+
+    "clock": {
+        // swaybar ran `while date +'%Y-%m-%d %X'; do sleep 1; done`.
+        "interval": 1,
+        "format": "{:%Y-%m-%d %H:%M:%S}",
+        "tooltip-format": "<tt>{calendar}</tt>"
+    }
+}

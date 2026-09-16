@@ -1,0 +1,406 @@
+#!/bin/sh
+# Web apps on workspaces of their own: switch to one, and report what is waiting.
+#
+# Usage: webapp <app> [toggle|show|launch|waybar]
+#        apps: slack, gmail, calendar
+#
+# Each runs as a Chrome *app* window rather than a tab, which buys three things a
+# normal window cannot: an app_id of its own to hang sway rules off, a title that
+# is always that app's (so the counts below are trustworthy), and no address bar
+# to navigate away from by accident.
+#
+# The sway rules in ~/.config/sway/config park each window on its workspace, so
+# nothing here has to place, size or float anything: alone on a workspace a tiled
+# window just fills the screen, and the two that share one are tabbed so each
+# still gets the full width.
+#
+# This started as ~/.local/bin/slack and was generalised when Gmail and Calendar
+# wanted the same treatment -- the alternative was three copies of the launch,
+# focus and urgency logic drifting apart. `slack` remains as a one-line wrapper.
+
+# --- the app table ----------------------------------------------------------
+# A `case` rather than a here-doc table or one conf file per app: the field that
+# genuinely differs between apps is the unread PARSER -- code -- and a data table
+# cannot hold code. It would have needed a second case beside it just to
+# dispatch, i.e. two places to edit per app, which is the drift this script
+# exists to remove. Conf files would buy runtime editing nobody wants for three
+# fixed apps and spread the mapping over four files. (~/.config/pomodoro.conf is
+# the counter-example that earns its keep: one scalar a human retunes often.)
+#
+# ID is a PREFIX of the app_id, not the whole thing -- see find_con.
+#
+# HOT is spelled out rather than derived as "$CLS-unread" for one reason: Slack's
+# attention class is already `slack-mention` in style.css, and renaming it would
+# mean editing CSS for a refactor that is meant to be invisible to it.
+#
+# Icons are written as octal UTF-8 rather than as literal glyphs: they are
+# Private Use Area codepoints, and pasting those around tends to lose them
+# silently. Both are in the FontAwesome that waybar's font stack already names.
+app_config() {  # sets NAME, ID, URL, WS, CLS, HOT, ICON for $1
+    case "$1" in
+        slack)
+            NAME=Slack
+            ID='chrome-app\.slack\.com__'
+            URL=https://app.slack.com/client
+            WS=slack
+            CLS=slack; HOT=slack-mention
+            ICON=$(printf '\357\206\230')       # U+F198 fa-slack
+            ;;
+        gmail)
+            NAME=Gmail
+            ID='chrome-mail\.google\.com__'
+            URL=https://mail.google.com/mail/u/0/
+            WS=mail
+            CLS=gmail; HOT=gmail-unread
+            ICON=$(printf '\357\203\240')       # U+F0E0 fa-envelope
+            ;;
+        calendar)
+            NAME="Google Calendar"
+            ID='chrome-calendar\.google\.com__'
+            URL=https://calendar.google.com/calendar/u/0/r
+            WS=mail
+            CLS=calendar; HOT=calendar-due
+            ICON=$(printf '\357\201\263')       # U+F073 fa-calendar
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+# Apps sharing a workspace, in the order they should be launched -- which is the
+# order they end up in as tabs. Keyed by workspace rather than by app, because
+# the workspace is the thing you switch to, and a tabbed workspace holding one
+# tab is just a workspace with a stray tab bar. $2 is the answer for an app that
+# lives alone, so slack needs no entry.
+ws_apps() {  # workspace, fallback-app
+    case "$1" in
+        mail) echo gmail; echo calendar ;;
+        *)    echo "$2" ;;
+    esac
+}
+
+# --- sway -------------------------------------------------------------------
+tree() { swaymsg -t get_tree 2>/dev/null; }
+
+# Matched on the app_id PREFIX, not on equality. Chrome derives an app_id from
+# the --app URL as
+#     chrome-<host>__<path with / as _>-<chrome profile>
+# so https://app.slack.com/client becomes chrome-app.slack.com__client-Default.
+# Only the host half is knowable in advance: the path is a guess that moves
+# whenever a URL is reshuffled or a trailing slash appears (mail_u_0 against
+# mail_u_0_), and the suffix moves if a second Chrome profile ever exists. The
+# old script hardcoded the whole id and its own comment named "silently matches
+# nothing" as the failure mode. "chrome-<host>__" survives both, and the
+# for_window rules in ~/.config/sway/config match the same prefix as a regex --
+# sway criteria are PCRE2 too -- so config and script cannot drift apart.
+#
+# What a prefix CAN over-match is another Chrome app window on the same host: a
+# second Gmail account, or a compose pop-out. Ordinary browser tabs cannot -- they
+# all share the app_id "google-chrome". Matching exactly would not have helped
+# with the pop-out either (same app, same id), while it would have kept the one
+# failure mode that is silent.
+#
+# The `.app_id != null` guard is load-bearing, unlike in the equality version it
+# replaces: `null | test(...)` is a jq ERROR, not false, and would abort the
+# whole filter rather than skipping the node.
+con_matching() {  # id-prefix regex -> con ids, one per line
+    tree | jq -r --arg p "^$1" '
+        recurse(.nodes[]?, .floating_nodes[]?)
+        | select(.app_id != null and (.app_id | test($p))) | .id' 2>/dev/null
+}
+
+find_con() {  # app -> con_id of its window, empty if not running
+    ( app_config "$1" || exit 1; con_matching "$ID" | head -1 )
+}
+
+title_of() {  # app -> its window title, empty if not running
+    ( app_config "$1" || exit 1
+      tree | jq -r --arg p "^$ID" '
+          recurse(.nodes[]?, .floating_nodes[]?)
+          | select(.app_id != null and (.app_id | test($p))) | .name' 2>/dev/null \
+      | head -1 )
+}
+
+current_ws() {
+    swaymsg -t get_workspaces 2>/dev/null | jq -r '.[] | select(.focused) | .name'
+}
+
+focused_con() {
+    tree | jq -r 'recurse(.nodes[]?, .floating_nodes[]?)
+                  | select(.focused == true) | .id' 2>/dev/null | head -1
+}
+
+# Which workspace an app's window is actually ON -- empty if it is not running.
+# The tree is walked by explicit level (outputs, then workspaces) rather than
+# with `..`, so the name we report is always a workspace's and never some nested
+# container's.
+ws_of_app() {  # app
+    ( app_config "$1" || exit 1
+      tree | jq -r --arg p "^$ID" '
+          .nodes[] | .nodes[]? | .name as $ws
+          | [recurse(.nodes[]?, .floating_nodes[]?) | .app_id // empty
+             | select(test($p))]
+          | select(length > 0) | $ws' 2>/dev/null | head -1 )
+}
+
+# Put this workspace's windows back on it.
+#
+# The for_window rules in ~/.config/sway/config only fire when a window is
+# CREATED: they place an app once and never look again. Anything that moves one
+# afterwards -- a mistyped $mod+Shift+<number>, a drag, a workspace destroyed and
+# rebuilt -- leaves it stranded there for good, and the focus step at the end of
+# show/toggle then loyally follows it: you press $mod+c, sway switches to the
+# "slack" workspace, and the focus command immediately pulls you back to wherever
+# Slack actually drifted to. What you see is the shortcut going to the wrong
+# place, which is a much more confusing symptom than the window having moved.
+#
+# So placement is re-asserted here rather than trusted. It is idempotent, costs
+# two queries per app on a keypress, and makes the key mean what it says however
+# the window got lost.
+place_group() {  # workspace, app-if-it-lives-alone
+    live=0 moved=
+    for a in $(ws_apps "$1" "$2"); do
+        c=$(find_con "$a")
+        [ -n "$c" ] || continue
+        live=$((live + 1))
+        [ "$(ws_of_app "$a")" = "$1" ] && continue
+        swaymsg "[con_id=$c] move --no-auto-back-and-forth to workspace $1" \
+            >/dev/null 2>&1
+        moved=$c
+    done
+
+    # A window moved in after the fact joins the workspace as a sibling; the rule
+    # that would have tabbed it is long past. Re-tab -- but only when something
+    # actually moved AND there is more than one window to tab. `layout tabbed` on
+    # a lone window wraps it in a container with a tab bar of its own, spending
+    # ~25px to label a window that is already alone on its workspace, which is
+    # the very thing `border pixel 1` is there to avoid. (Verified: it does
+    # exactly that to Slack.) A window that landed inside an already-tabbed
+    # container makes this a no-op, which is the common case.
+    [ -n "$moved" ] && [ "$live" -gt 1 ] &&
+        swaymsg "[con_id=$moved] layout tabbed" >/dev/null 2>&1
+    return 0
+}
+
+# Start every app on a workspace that is not already up.
+#
+# A window maps on whatever workspace is current and the for_window rule then
+# moves it to its own -- and sway's focus follows it there. So remember where we
+# were and come back, otherwise merely starting Gmail (at login, or from the bar
+# icon) drags you onto its workspace. Callers that DO want to end up there switch
+# explicitly afterwards.
+#
+# Two details that the single-app version of this got away with and two apps do
+# not. `back` is captured ONCE, before anything is spawned: re-reading it before
+# the second launch would read "mail", because the first launch just put us
+# there. And the return is guarded on being ON $WS rather than on "somewhere
+# other than where I started" -- if you walked off yourself while Chrome took its
+# five seconds, that is where you want to stay.
+ensure_group() {  # workspace, app-if-it-lives-alone
+    back=$(current_ws)
+    started=
+    for a in $(ws_apps "$1" "$2"); do
+        [ -n "$(find_con "$a")" ] && continue
+        # Subshell: app_config sets globals, and configuring a sibling would
+        # otherwise clobber the caller's. Nothing needs to come back -- the
+        # effects are Chrome and swaymsg, both external.
+        ( app_config "$a" && setsid google-chrome --app="$URL" \
+            >/dev/null 2>&1 </dev/null & )
+        started="$started $a"
+    done
+    [ -n "$started" ] || return 0
+
+    # Chrome takes several seconds to map a window, so wait on the clock rather
+    # than on an iteration count -- and wait for ALL of them, because the tab bar
+    # is wrong until the last one has landed.
+    n=0
+    while [ "$n" -lt 100 ]; do            # 100 * 0.2s = 20s
+        missing=
+        for a in $started; do
+            [ -n "$(find_con "$a")" ] || missing=1
+        done
+        [ -z "$missing" ] && break
+        sleep 0.2
+        n=$((n + 1))
+    done
+
+    [ -n "$back" ] && [ "$back" != "$1" ] && [ "$(current_ws)" = "$1" ] &&
+        swaymsg "workspace --no-auto-back-and-forth $back" >/dev/null 2>&1
+    [ -z "$missing" ]
+}
+
+# --- unread counts ----------------------------------------------------------
+# Each parser is handed the window title and prints the count -- or prints
+# NOTHING, meaning "the title cannot tell us". Empty is not zero, and that
+# difference is the whole reason the cache in the waybar branch exists.
+unread_of() {  # app, title
+    case "$1" in
+        slack)
+            # Slack's own title conventions, the only handle a browser tab offers
+            # short of the Slack API:
+            #   "! <name> - <workspace> - N new items - Slack"  mentions and DMs
+            #   "* <name> - <workspace> - Slack"                ordinary unread
+            # Only the "!" form counts: that is the "needs you" state, and a busy
+            # channel you are not named in should not light the bar up. Slack
+            # says one or the other whatever view is open, so this parser never
+            # answers "unknown" and the cache never engages for it.
+            case "$2" in
+                '!'*)
+                    n=$(printf '%s' "$2" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) new item.*/\1/p')
+                    printf '%s\n' "${n:-1}"   # "!" with no count still means you
+                    ;;
+                *) echo 0 ;;
+            esac
+            ;;
+        gmail)
+            # Gmail's title is a property of the CURRENT VIEW, not of the mailbox:
+            #   "Inbox (12) - you@example.com - Gmail"   inbox, 12 unread
+            #   "Inbox - you@example.com - Gmail"        inbox, nothing unread
+            #   "<Subject> - you@example.com - Gmail"    a thread is open
+            #   "Sent - ...", "New Message", ...
+            # so unlike Slack it genuinely goes unknown the moment you open a
+            # message, and saying "0" there would be a lie. Anchored at ^Inbox on
+            # purpose: a subject line may perfectly well start with the word.
+            # Commas are stripped before the digits are read -- a four-figure
+            # inbox is titled "Inbox (1,234)", which a bare [0-9]* would fail to
+            # match at all, quietly turning a big number into "unknown".
+            case "$2" in
+                'Inbox ('*) printf '%s' "$2" \
+                    | sed -n 's/^Inbox (\([0-9,]*\)).*/\1/p' | tr -d ',' ;;
+                'Inbox - '*|'Inbox') echo 0 ;;
+                *) echo '' ;;
+            esac
+            ;;
+        # Calendar has no unread anything and no waybar module; it is here for
+        # the launch and focus paths only.
+        *) echo '' ;;
+    esac
+}
+
+# --- commands ---------------------------------------------------------------
+APP=$1
+app_config "$APP" \
+    || { echo "usage: webapp <slack|gmail|calendar> [toggle|show|launch|waybar]" >&2
+         exit 1; }
+
+case "${2:-toggle}" in
+    launch)
+        # Deliberately literal: this is the non-interactive entry point, and
+        # "start exactly what I named" is the only sane contract for a login
+        # exec or another script. show/toggle below is the one that brings the
+        # whole workspace up.
+        [ -n "$(find_con "$APP")" ] || ensure_group "$WS" "$APP"
+        ;;
+
+    show|toggle)
+        con=$(find_con "$APP")
+        if [ "$2" = toggle ] && [ "$(current_ws)" = "$WS" ] \
+           && [ -n "$con" ] && [ "$(focused_con)" = "$con" ]; then
+            # Already looking at this very window: go back where you came from.
+            # Relies on sway's back_and_forth, the same thing $mod+Tab uses.
+            # Note the focused-con test -- on the tabbed mail workspace, pressing
+            # $mod+m while the Calendar tab is in front should bring Gmail
+            # forward, not leave. Only a second press leaves. On Slack's
+            # single-window workspace this is the old behaviour exactly.
+            swaymsg workspace back_and_forth >/dev/null 2>&1
+            exit 0
+        fi
+        # The whole workspace, not just the app asked for: on a shared, tabbed
+        # workspace a lone Gmail with no Calendar tab to flip to is not what
+        # $mod+m is supposed to produce.
+        ensure_group "$WS" "$APP" || exit 1
+        # Snap any stray back before switching, so the focus below cannot teleport
+        # you to wherever a window wandered off to.
+        place_group "$WS" "$APP"
+        # --no-auto-back-and-forth because workspace_auto_back_and_forth is on:
+        # without it, switching to the workspace you are already standing on
+        # means "go back", which is the exact opposite of the tab-focus below.
+        swaymsg "workspace --no-auto-back-and-forth $WS" >/dev/null 2>&1
+        # Then focus the app actually asked for -- a tabbed workspace remembers
+        # which tab was in front, and that may not be this one.
+        con=$(find_con "$APP")
+        [ -n "$con" ] && swaymsg "[con_id=$con] focus" >/dev/null 2>&1
+        ;;
+
+    waybar)
+        title=$(title_of "$APP")
+        n=$(unread_of "$APP" "$title")
+
+        # Remember the last count we were actually told. Gmail stops reporting
+        # one the moment you open a thread, and that is not a blip: leave the
+        # window on an open mail and the title stays that way for hours, so
+        # blanking would hide the count for exactly as long as you are away.
+        # Worse, the count also drives the sway urgency flag that makes the
+        # workspace button visible at all, so a blank would make a waiting inbox
+        # invisible. Show the remembered number instead, tagged stale.
+        #
+        # Under $XDG_RUNTIME_DIR so it dies with the session -- a count
+        # remembered across a reboot would be a lie. Written via a temp file and
+        # mv, like claude-sessions' SEEN, so a poll killed mid-write cannot leave
+        # a truncated number behind.
+        STATE="${XDG_RUNTIME_DIR:-/tmp}/webapp-$APP.count"
+        stale=
+        if [ -n "$n" ]; then
+            printf '%s\n' "$n" > "$STATE.$$" && mv -f "$STATE.$$" "$STATE"
+        elif [ -n "$title" ]; then
+            n=$(cat "$STATE" 2>/dev/null)
+            # Nothing remembered yet: a cold start must read as a calm zero, not
+            # as a dimmed lie, so `stale` stays unset here.
+            case "$n" in ''|*[!0-9]*) n=0 ;; *) stale=1 ;; esac
+        else
+            n=0                            # not running: nothing to report
+        fi
+
+        # Drive the window's urgency flag from the count. This is what makes the
+        # workspace button appear in the bar only when something wants you:
+        # waybar renders an urgent workspace as button.urgent, and style.css
+        # collapses that button to nothing when it is not urgent. CSS cannot see
+        # a window title, so something has to translate one into the other, and
+        # this module is already polling.
+        #
+        # Skipped while you are on the workspace: sway clears urgency on focus,
+        # so re-setting it every poll would make the button flicker while you sit
+        # there reading.
+        #
+        # Skipped again when the count is STALE, and that one is the subtle case:
+        # neither answer is safe. Enabling would pin the button until you next
+        # open the inbox; disabling would hide mail that really is waiting. Gmail
+        # rewrites its title back to "Inbox (N)" whenever you return to the list,
+        # so leaving the flag alone lets it heal itself.
+        con=$(find_con "$APP")
+        if [ -n "$con" ] && [ -z "$stale" ] && [ "$(current_ws)" != "$WS" ]; then
+            if [ "$n" -gt 0 ]; then
+                swaymsg "[con_id=$con] urgent enable"  >/dev/null 2>&1
+            else
+                swaymsg "[con_id=$con] urgent disable" >/dev/null 2>&1
+            fi
+        fi
+
+        if   [ -z "$title" ] ; then cls="$CLS-gone";  txt="$ICON"
+        elif [ "$n" -gt 0 ]  ; then cls="$HOT";       txt="$ICON $n"
+        else                        cls="$CLS-quiet"; txt="$ICON"
+        fi
+
+        tip=${title:-$NAME is not running}
+        [ -n "$stale" ] && tip="$tip
+$n unread, as of the last inbox view"
+
+        # Built with jq, not printf: the title goes into a JSON string verbatim
+        # and email subject lines routinely contain quotes and backslashes. The
+        # printf this replaced emitted invalid JSON for those, and waybar's only
+        # symptom is a module that silently goes blank until the title changes.
+        # Pango entities (& and <) are waybar's job -- "escape": true on the
+        # module, see ~/.config/waybar/config.
+        #
+        # The stale marker rides as a SECOND class on top of the state one, the
+        # way pomo-paused does, so it needs no rules of its own per state.
+        jq -cn --arg t "$txt" --arg tip "$tip" \
+               --arg c "$cls" --arg s "${stale:+$CLS-stale}" \
+           '{ text: $t, tooltip: $tip,
+              class: [$c] + (if $s == "" then [] else [$s] end) }'
+        ;;
+
+    *)
+        echo "usage: webapp <slack|gmail|calendar> [toggle|show|launch|waybar]" >&2
+        exit 1
+        ;;
+esac

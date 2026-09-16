@@ -1,0 +1,31 @@
+# What install.sh links where.
+#
+#   <path in this repo>    <path under $HOME>
+#
+# Blank lines and # comments are ignored. Two columns, whitespace separated.
+#
+# Directories are linked as a whole (~/.config/sway becomes a symlink to
+# config/sway/). Individual files are linked one by one, which is what
+# ~/.local/bin needs -- that directory holds unrelated things, so linking it
+# wholesale would hijack it.
+
+config/sway             .config/sway
+config/waybar           .config/waybar
+config/foot             .config/foot
+config/hypr             .config/hypr
+config/gammastep        .config/gammastep
+
+# Sits directly in ~/.config next to unrelated files, so it is linked as a
+# single file rather than by its parent directory.
+config/pomodoro.conf    .config/pomodoro.conf
+
+bin/pomodoro            .local/bin/pomodoro
+bin/claude-sessions     .local/bin/claude-sessions
+bin/webapp              .local/bin/webapp
+bin/slack               .local/bin/slack
+bin/named-term          .local/bin/named-term
+bin/lock-session        .local/bin/lock-session
+bin/volume              .local/bin/volume
+bin/brightness          .local/bin/brightness
+bin/clip-sync           .local/bin/clip-sync
+bin/window-identity     .local/bin/window-identity

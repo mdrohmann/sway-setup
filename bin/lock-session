@@ -1,0 +1,19 @@
+#!/bin/sh
+# Lock the session, then make sure the outputs are powered back on.
+#
+# The Goodix sensor is not on sway's seat (no /dev/input node -- fprintd talks
+# to it over USB and hands hyprlock the result over D-Bus), so a fingerprint
+# unlock generates zero libinput activity. swayidle therefore never leaves the
+# idle state, its `resume` hook never fires, and if the outputs were powered
+# off while locked nothing turns them back on: the screen stays dark until a
+# real key press produces the activity swayidle was waiting for.
+#
+# Powering the outputs on here, after hyprlock exits, covers that path. It is a
+# no-op when the screen is already on (password unlock, or unlock before the
+# blank timeout), so it is safe on every unlock.
+
+# Don't fight an existing lock instance for the ext-session-lock.
+pidof hyprlock >/dev/null && exit 0
+
+hyprlock
+swaymsg "output * power on" >/dev/null

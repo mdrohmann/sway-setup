@@ -1,0 +1,498 @@
+# Personal sway config -- a copy of /etc/sway/config with local edits.
+#
+# Marked edits: $volume variable, the volume bindings, and the reload binding.
+# Because this is a copy, distro updates to /etc/sway/config are NOT picked
+# up here; diff against it after a sway upgrade.
+#
+# Read `man 5 sway` for a complete reference.
+
+### Variables
+#
+# Logo key. Use Mod1 for Alt.
+set $mod Mod4
+# Home row direction keys, like vim
+set $left h
+set $down j
+set $up k
+set $right l
+# Your preferred terminal emulator
+set $term foot
+# Your preferred application launcher
+set $menu wmenu-run
+# Volume helper (wpctl wrapper with an on-screen readout)
+set $volume ~/.local/bin/volume
+set $brightness ~/.local/bin/brightness
+
+include /etc/sway/config-vars.d/*
+
+### Output configuration
+#
+# Default wallpaper (more resolutions are available in /usr/share/backgrounds/sway/)
+# This is commented in Debian, because the Sway wallpaper files are in a separate
+# package `sway-backgrounds`. Installing this package drops a config file to
+# /etc/sway/config.d/
+# output * bg /usr/share/backgrounds/sway/Sway_Wallpaper_Blue_1920x1080.png fill
+#
+# Example configuration:
+#
+#   output HDMI-A-1 resolution 1920x1080 position 1920,0
+#
+# You can get the names of your outputs by running: swaymsg -t get_outputs
+
+### Idle configuration
+#
+# Example configuration:
+#
+# Lock after 5 min idle, blank the display after 10, and always lock before
+# suspend so a closed lid never exposes the session.
+#
+# hyprlock has no -f: it blocks until unlocked. For the timeouts that is fine
+# (swayidle does not wait on those), but -w makes swayidle hold a systemd sleep
+# inhibitor until before-sleep returns, so a blocking locker there would stall
+# suspend until someone unlocked the machine. Hence the background-and-settle
+# form: hyprlock gets ~1s to grab ext-session-lock, then the inhibitor drops.
+#
+# lock-session wraps hyprlock: it re-powers the outputs after unlock, because a
+# fingerprint unlock produces no seat activity and so never fires the `resume`
+# hook below that would otherwise undo the blank. It also carries the pidof
+# guard for the double-lock case, where the idle timeout fires and suspend
+# follows: a second instance would fight the first for the session lock.
+exec swayidle -w \
+         timeout 300 '~/.local/bin/lock-session' \
+         timeout 600 'swaymsg "output * power off"' resume 'swaymsg "output * power on"' \
+         before-sleep '~/.local/bin/lock-session & sleep 1'
+
+    # Lock on demand. swaylock stays installed as a fallback.
+    bindsym $mod+Ctrl+l exec ~/.local/bin/lock-session
+
+    # Don't blank the screen during fullscreen video.
+    for_window [app_id="firefox"] inhibit_idle fullscreen
+    for_window [app_id="google-chrome"] inhibit_idle fullscreen
+    for_window [app_id="mpv"] inhibit_idle fullscreen
+
+# Night-light: warms the display after sunset. Location and temperatures
+# live in ~/.config/gammastep/config.ini. The indicator adds a tray toggle.
+exec gammastep-indicator
+
+### Input configuration
+#
+# Example configuration:
+#
+#   input type:touchpad {
+#       dwt enabled
+#       tap enabled
+#       natural_scroll enabled
+#       middle_emulation enabled
+#   }
+#
+#   input type:keyboard {
+#       xkb_layout "eu"
+#   }
+#
+# You can also configure each device individually.
+# Read `man 5 sway-input` for more information about this section.
+
+# CapsLock acts as an additional Ctrl; the caps-lock function itself is gone.
+input type:keyboard {
+    xkb_options ctrl:nocaps
+}
+
+### Key bindings
+#
+# Basics:
+#
+    # Start a terminal with a fixed, memorable name -- see ~/.local/bin/named-term.
+    # The title is locked at launch to "<adjective animal> - <cwd>", so $mod+o
+    # (rofi -show window) always lists the same names and you can learn where each
+    # one lives. It also opens in the focused terminal's directory rather than ~,
+    # which is what makes the cwd half of the name worth anything.
+    bindsym $mod+Return exec ~/.local/bin/named-term
+    # Escape hatch: an ordinary foot whose title apps are free to rewrite.
+    bindsym $mod+Shift+Return exec $term
+
+    # Kill focused window
+    bindsym $mod+Shift+q kill
+
+    # Start your launcher
+    bindsym $mod+d exec $menu
+    # rofi runs alongside wmenu, not instead of it: drun lists .desktop entries
+    # with real names/icons, and -show window jumps to any window by title.
+    bindsym $mod+Shift+d exec rofi -show drun
+    bindsym $mod+o exec rofi -show window
+
+    # Drag floating windows by holding down $mod and left mouse button.
+    # Resize them with right mouse button + $mod.
+    # Despite the name, also works for non-floating windows.
+    # Change normal to inverse to use left mouse button for resizing and right
+    # mouse button for dragging.
+    floating_modifier $mod normal
+
+    # Reload the configuration file (with a confirmation notification)
+    set $reload reload, exec notify-send -a sway -u low -t 1500 \
+        -h string:x-dunst-stack-tag:sway-reload 'Sway' 'Config reloaded'
+    bindsym $mod+Shift+c $reload
+    bindsym $mod+Shift+r $reload
+
+    # Exit sway (logs you out of your Wayland session)
+    bindsym $mod+Shift+e exec swaynag -t warning -m 'You pressed the exit shortcut. Do you really want to exit sway? This will end your Wayland session.' -B 'Yes, exit sway' 'swaymsg exit'
+#
+# Moving around:
+#
+    # Move your focus around
+    bindsym $mod+$left focus left
+    bindsym $mod+$down focus down
+    bindsym $mod+$up focus up
+    bindsym $mod+$right focus right
+    # Or use $mod+[up|down|left|right]
+    bindsym $mod+Left focus left
+    bindsym $mod+Down focus down
+    bindsym $mod+Up focus up
+    bindsym $mod+Right focus right
+
+    # Move the focused window with the same, but add Shift
+    bindsym $mod+Shift+$left move left
+    bindsym $mod+Shift+$down move down
+    bindsym $mod+Shift+$up move up
+    bindsym $mod+Shift+$right move right
+    # Ditto, with arrow keys
+    bindsym $mod+Shift+Left move left
+    bindsym $mod+Shift+Down move down
+    bindsym $mod+Shift+Up move up
+    bindsym $mod+Shift+Right move right
+#
+# Workspaces:
+#
+    # Re-pressing the shortcut for the current workspace jumps back to the
+    # previously focused one (e.g. 4 -> $mod+2 -> 2 -> $mod+2 -> 4).
+    workspace_auto_back_and_forth yes
+
+    # Toggle between the current and previously focused workspace.
+    bindsym $mod+Tab workspace back_and_forth
+
+    # Shift the current workspace to the next monitor over.
+    bindsym $mod+Shift+bracketright move workspace to output right
+    bindsym $mod+Shift+bracketleft  move workspace to output left
+
+    # Switch to workspace
+    bindsym $mod+1 workspace number 1
+    bindsym $mod+2 workspace number 2
+    bindsym $mod+3 workspace number 3
+    bindsym $mod+4 workspace number 4
+    bindsym $mod+5 workspace number 5
+    bindsym $mod+6 workspace number 6
+    bindsym $mod+7 workspace number 7
+    bindsym $mod+8 workspace number 8
+    bindsym $mod+9 workspace number 9
+    bindsym $mod+0 workspace number 10
+    # Move focused container to workspace
+    bindsym $mod+Shift+1 move container to workspace number 1
+    bindsym $mod+Shift+2 move container to workspace number 2
+    bindsym $mod+Shift+3 move container to workspace number 3
+    bindsym $mod+Shift+4 move container to workspace number 4
+    bindsym $mod+Shift+5 move container to workspace number 5
+    bindsym $mod+Shift+6 move container to workspace number 6
+    bindsym $mod+Shift+7 move container to workspace number 7
+    bindsym $mod+Shift+8 move container to workspace number 8
+    bindsym $mod+Shift+9 move container to workspace number 9
+    bindsym $mod+Shift+0 move container to workspace number 10
+    # Note: workspaces can have any name you want, not just numbers.
+    # We just use 1-10 as the default.
+#
+# Layout stuff:
+#
+    # You can "split" the current object of your focus with
+    # $mod+b or $mod+v, for horizontal and vertical splits
+    # respectively.
+    bindsym $mod+b splith
+    bindsym $mod+v splitv
+
+    # Switch the current container between different layout styles
+    bindsym $mod+s layout stacking
+    bindsym $mod+w layout tabbed
+    bindsym $mod+e layout toggle split
+
+    # Make the current focus fullscreen
+    bindsym $mod+f fullscreen
+
+    # Toggle the current focus between tiling and floating mode
+    bindsym $mod+Shift+space floating toggle
+
+    # Show the focused window's app_id/class, for writing the rules below.
+    bindsym $mod+Shift+i exec ~/.local/bin/window-identity
+
+    # Swap focus between the tiling area and the floating area
+    bindsym $mod+space focus mode_toggle
+
+    # Move focus to the parent container
+    bindsym $mod+a focus parent
+#
+# Scratchpad:
+#
+    # Sway has a "scratchpad", which is a bag of holding for windows.
+    # You can send windows there and get them back later.
+
+    # Move the currently focused window to the scratchpad
+    bindsym $mod+Shift+minus move scratchpad
+
+    # Show the next scratchpad window or hide the focused scratchpad window.
+    # If there are multiple scratchpad windows, this command cycles through them.
+    bindsym $mod+minus scratchpad show
+#
+# Resizing containers:
+#
+mode "resize" {
+    # left will shrink the containers width
+    # right will grow the containers width
+    # up will shrink the containers height
+    # down will grow the containers height
+    bindsym $left resize shrink width 10px
+    bindsym $down resize grow height 10px
+    bindsym $up resize shrink height 10px
+    bindsym $right resize grow width 10px
+
+    # Ditto, with arrow keys
+    bindsym Left resize shrink width 10px
+    bindsym Down resize grow height 10px
+    bindsym Up resize shrink height 10px
+    bindsym Right resize grow width 10px
+
+    # Return to default mode
+    bindsym Return mode "default"
+    bindsym Escape mode "default"
+}
+bindsym $mod+r mode "resize"
+#
+# Utilities:
+#
+    # Special keys to adjust volume via PipeWire (wpctl), with a dunst OSD.
+    # The upstream default used `pactl`, which needs pulseaudio-utils.
+    bindsym --locked XF86AudioRaiseVolume exec $volume up
+    bindsym --locked XF86AudioLowerVolume exec $volume down
+    bindsym --locked XF86AudioMute        exec $volume mute
+    bindsym --locked XF86AudioMicMute     exec $volume micmute
+    # Fine-grained 1% steps while holding Shift.
+    bindsym --locked Shift+XF86AudioRaiseVolume exec $volume up 1
+    bindsym --locked Shift+XF86AudioLowerVolume exec $volume down 1
+    # Fallbacks in case the media keys aren't available. Kept in the
+    # $mod+Ctrl namespace: $mod+minus/plus are already scratchpad bindings.
+    bindsym --locked $mod+Ctrl+Up    exec $volume up
+    bindsym --locked $mod+Ctrl+Down  exec $volume down
+    bindsym --locked $mod+Ctrl+$up   exec $volume up
+    bindsym --locked $mod+Ctrl+$down exec $volume down
+    bindsym --locked $mod+Ctrl+m     exec $volume mute
+    # Full mixer.
+    bindsym $mod+Shift+m exec $term -e alsamixer
+    # Clipboard history: pick an entry, or delete one from the history.
+    bindsym $mod+p       exec cliphist list | wmenu -l 20 -p clipboard | cliphist decode | wl-copy
+    bindsym $mod+Shift+p exec cliphist list | wmenu -l 20 -p delete | cliphist delete
+
+    # Pomodoro (the waybar custom/pomodoro tomato). $mod+t pauses and resumes,
+    # $mod+Shift+t starts a fresh session. Left-click the tomato toggles,
+    # right-click resets, middle-click puts it back to idle.
+    #
+    # Session length lives in ~/.config/pomodoro.conf (MINUTES=30 by default),
+    # not here -- editing it takes effect on the next 1 Hz tick, with no reload.
+    bindsym $mod+t exec ~/.local/bin/pomodoro toggle
+    bindsym $mod+Shift+t exec ~/.local/bin/pomodoro reset
+
+    # Slack, as a dedicated Chrome app window -- see ~/.local/bin/webapp, which
+    # ~/.local/bin/slack is a one-line wrapper for. Toggles to its workspace and
+    # back; launches it if it is not running. The app_id it matches on is set by
+    # the for_window rule below.
+    bindsym $mod+c exec ~/.local/bin/slack toggle
+
+    # Mail: Gmail and Google Calendar, tabbed on a workspace they share. The
+    # first press starts BOTH -- a tabbed workspace with one tab is just a
+    # workspace with a stray tab bar -- and lands on Gmail.
+    #
+    # Calendar gets no key of its own: on a tabbed workspace $mod+$left and
+    # $mod+$right already cycle the tabs. Pressing $mod+m again from the Calendar
+    # tab brings Gmail forward; pressing it from Gmail leaves.
+    bindsym $mod+m exec ~/.local/bin/webapp gmail toggle
+
+    # Jump to a Claude Code session by name -- see ~/.local/bin/claude-sessions.
+    # Lists every live session with whether it is working or waiting on you, and
+    # focuses the terminal hosting the one you pick (including through tmux).
+    # Rows lead with the WINDOW's name, so this picker and $mod+o agree on what
+    # everything is called.
+    bindsym $mod+g exec ~/.local/bin/claude-sessions menu
+
+    # Dismiss dunst notifications.
+    bindsym $mod+n            exec dunstctl close
+    bindsym $mod+Shift+n      exec dunstctl close-all
+    bindsym $mod+Ctrl+n       exec dunstctl history-pop
+    bindsym $mod+Ctrl+Shift+n exec dunstctl set-paused toggle
+
+    # Special keys to adjust brightness via brightnessctl, with a dunst OSD
+    # (same script shape as $volume, so both feedbacks match).
+    bindsym --locked XF86MonBrightnessDown exec $brightness down
+    bindsym --locked XF86MonBrightnessUp   exec $brightness up
+    # Fine-grained 1% steps while holding Shift.
+    bindsym --locked Shift+XF86MonBrightnessDown exec $brightness down 1
+    bindsym --locked Shift+XF86MonBrightnessUp   exec $brightness up 1
+    # Screenshots via grimshot: save to $XDG_PICTURES_DIR, or copy to clipboard.
+    # 'area' and 'window' select interactively via slurp.
+    bindsym Print            exec grimshot --notify save screen
+    bindsym Shift+Print      exec grimshot --notify save area
+    bindsym $mod+Print       exec grimshot --notify save active
+    bindsym Ctrl+Print       exec grimshot --notify copy screen
+    bindsym Ctrl+Shift+Print exec grimshot --notify copy area
+
+#
+# Status Bar:
+#
+# Read `man 5 sway-bar` for more information about this section.
+# Waybar replaces swaybar: swaybar has no DBusMenu support, so tray icons
+# (nm-applet) could not be clicked. Waybar links libdbusmenu-gtk3 and hosts
+# them properly. Its config lives in ~/.config/waybar/{config,style.css}.
+# `swaybar_command` leaves the lifecycle to sway: it starts waybar with the
+# session and restarts it on reload, so no pkill dance is needed.
+bar {
+    swaybar_command waybar
+}
+
+# The previous swaybar block, kept for reference -- uncomment this and delete
+# the block above to go back (the colours are ported into waybar style.css).
+# bar {
+#     position top
+#
+#     # System tray. Swaybar is a StatusNotifierItem host, and the tray is
+#     # enabled on every output by default -- these lines only make the docked
+#     # icons legible. `icon_theme` matters: without it sway falls back to
+#     # `hicolor`, in which most applets ship no icon at all.
+#     icon_theme Yaru
+#     tray_padding 4
+#     # tray_output <name>   # restrict the tray to one output, e.g. with 2 bars
+#
+#     # When the status_command prints a new line to stdout, swaybar updates.
+#     # The default just shows the current date and time.
+#     status_command while date +'%Y-%m-%d %X'; do sleep 1; done
+#
+#     colors {
+#         statusline #ffffff
+#         background #323232
+#         inactive_workspace #32323200 #32323200 #5c5c5c
+#     }
+# }
+
+### Clipboard ################################################################
+#
+# Keep PRIMARY (select / middle-click) and CLIPBOARD (Ctrl+C / Ctrl+V) in sync.
+# `exec`, not `exec_always`: a reload must not spawn a second copy.
+exec ~/.local/bin/clip-sync both
+
+# Clipboard history (cliphist). Text and images are stored separately.
+exec wl-paste --type text  --watch cliphist store
+exec wl-paste --type image --watch cliphist store
+
+### Tray applets ############################################################
+#
+# Applications that dock into the swaybar tray over D-Bus (StatusNotifierItem).
+# `exec`, not `exec_always`: a reload must not spawn a second copy.
+#
+# nm-applet: NetworkManager status, Wi-Fi picker and VPN toggles. This build
+# links libayatana-appindicator, so indicator (SNI) mode is the default and
+# needs no flag; `--no-indicator` would fall back to the X11 tray, which does
+# not exist under Wayland. Left-click opens the network list, right-click the
+# menu. Add further applets here the same way, e.g.:
+#   exec blueman-applet
+#   exec pasystray
+exec nm-applet
+# Authentication dialogs for privileged GUI actions (NM VPN activation, etc).
+exec /usr/lib/policykit-1-gnome/polkit-gnome-authentication-agent-1
+exec blueman-applet
+
+### Power alerts #############################################################
+#
+# poweralertd turns UPower's D-Bus signals into desktop notifications, which
+# dunst renders. Without it upower's PercentageLow/PercentageCritical events
+# (20% / 5%) fire into nothing -- the waybar battery module was the only cue.
+#
+# Started here rather than by its packaged systemd user unit: that unit is
+# WantedBy=graphical-session.target, which never activates in this session
+# because gdm execs sway directly instead of going through systemd. The unit
+# is disabled so it cannot start a second copy if that ever changes.
+# `-s` also reports on non-system devices, e.g. a Bluetooth headset battery.
+exec poweralertd -s
+
+### Floating windows #########################################################
+#
+# Generic rules: dialogs, pop-ups and splash screens rarely want to be tiled.
+# Web apps -- Slack, Gmail, Google Calendar. Each runs as a Chrome *app* window
+# (google-chrome --app=...), which is what gives it an app_id of its own instead
+# of sharing "google-chrome" with every other browser window. See
+# ~/.local/bin/webapp, which pins the same URLs.
+#
+# The criteria are app_id only, with no title, so a rule fires once when the
+# window is created rather than again on every title change -- otherwise Slack
+# would yank itself back every time a new message arrived.
+#
+# Firing only at creation does mean these rules place a window once and never
+# look again, so anything that moves one afterwards (a mistyped $mod+Shift+<n>,
+# a drag) strands it. ~/.local/bin/webapp re-asserts placement on every $mod+c /
+# $mod+m instead of trusting it -- see place_group there for why the symptom is
+# otherwise so confusing.
+#
+# Each app lives on a NAMED workspace, not a numbered one, so it sits outside the
+# $mod+1..$mod+0 range and nothing can land on it by accident -- only its own key
+# goes there. That also keeps the scratchpad free for ad-hoc use.
+#
+# Tiled, not floating: alone on a workspace a tiled window simply fills it, so
+# Slack gets the whole 1920x1181 instead of the 1687x1143 a centred floating
+# window managed. border pixel 1 drops the title bar, which would otherwise cost
+# ~24px to repeat a title the app already shows in its own header; "border
+# normal" puts it back. On the tabbed workspace below the tab bar is drawn by the
+# container rather than by the window border, so the tabs survive it.
+#
+# Sizing deliberately is NOT here: a resize in a for_window rule runs the instant
+# the window maps, and Chrome then applies its own remembered geometry on top, so
+# it silently had no effect (the window came up 949x1207 -- taller than the
+# screen).
+#
+# The criteria match the HOST PREFIX of the app_id, as an anchored regex --
+# sway(5) CRITERIA documents app_id as PCRE2. Chrome builds the full id as
+# chrome-<host>__<path with / as _>-<profile>, and only the host half is knowable
+# in advance: the path moves when a URL is reshuffled or a trailing slash appears,
+# the suffix moves if a second Chrome profile ever exists. ~/.local/bin/webapp
+# matches on exactly the same prefixes, so config and script cannot drift.
+for_window [app_id="^chrome-app\.slack\.com__"] \
+    border pixel 1, move to workspace slack
+
+# Gmail and Calendar SHARE the "mail" workspace, tabbed: each then gets the full
+# 1920 rather than half of it, which Gmail in particular needs.
+#
+# Order matters. `layout tabbed` must come AFTER `move to workspace` -- reversed,
+# it would tab whichever workspace the window happened to map on, silently
+# converting the one you were working in. (Verified: with the order below, the
+# source workspace is left alone.)
+#
+# What it actually produces, also verified, is a tabbed CONTAINER holding both
+# windows rather than a tabbed workspace -- sway wraps them rather than setting
+# the workspace's own layout. The difference is invisible here: the container is
+# the workspace's only child, so both tabs render at the full 1920 with a 25px
+# tab bar above, which is the whole point. It matters only if a third window ever
+# lands on this workspace, which would sit beside the pair rather than joining
+# the tabs.
+#
+# Re-applying it is idempotent, so the second app mapping is harmless, and
+# declaring it here rather than once at login is what makes it survive sway
+# destroying the workspace when you close both windows.
+for_window [app_id="^chrome-mail\.google\.com__"] \
+    border pixel 1, move to workspace mail, layout tabbed
+for_window [app_id="^chrome-calendar\.google\.com__"] \
+    border pixel 1, move to workspace mail, layout tabbed
+
+for_window [window_role="pop-up"] floating enable
+for_window [window_role="bubble"] floating enable
+for_window [window_role="dialog"] floating enable
+for_window [window_type="dialog"] floating enable
+for_window [window_type="menu"]   floating enable
+for_window [window_type="splash"] floating enable
+
+# Per-application rules. Press $mod+Shift+i to see the focused window's
+# app_id (Wayland) or class (X11), then add a line here. Examples:
+#   for_window [app_id="pavucontrol"] floating enable
+#   for_window [app_id="foot" title="^floaty$"] floating enable, resize set 900 600
+#   for_window [class="Google-chrome" title="^Picture-in-picture$"] floating enable, sticky enable
+
+include /etc/sway/config.d/*

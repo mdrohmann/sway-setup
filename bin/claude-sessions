@@ -1,0 +1,438 @@
+#!/bin/sh
+# List running Claude Code sessions and jump to the terminal hosting one.
+#
+# Usage: claude-sessions [list|menu|waybar]
+#
+# Claude Code maintains ~/.claude/sessions/<PID>.json for every live session,
+# carrying its name, cwd, sessionId and -- the useful part -- a `status` saying
+# whether it is mid-turn or waiting for you. That file is the whole data source
+# here; `ListAgents` inside a session reads the same thing, so the two agree.
+#
+# Which window a session lives in is decided by process ancestry alone, never by
+# matching titles -- that works whatever a window happens to be called. Titles
+# are read only afterwards, to LABEL the row you are about to pick; see
+# window_label for why only a locked title is trusted.
+
+# Fields are separated by US (0x1f), never by tab: tab counts as IFS whitespace,
+# so `read` collapses runs of it and an empty field (no tmux, no waitingFor)
+# silently shifts every later column left by one.
+US=$(printf '\037')
+
+# Last poll's rank per pid, for the ready-transition notification.
+SEEN="${XDG_RUNTIME_DIR:-/tmp}/claude-sessions.seen"
+
+SESSIONS="$HOME/.claude/sessions"
+PROJECTS="$HOME/.claude/projects"
+
+# --- /proc helpers ---------------------------------------------------------
+# Neither of these may split /proc/<pid>/stat on whitespace: `comm` is
+# parenthesised and can itself contain spaces ("tmux: server"), which silently
+# yields a garbage PPID. Parents come from status; starttime is read only after
+# discarding everything through the LAST ")".
+ppid_of() { awk '/^PPid:/{print $2; exit}' "/proc/$1/status" 2>/dev/null; }
+
+starttime_of() {
+    sed 's/.*) //' "/proc/$1/stat" 2>/dev/null | awk '{print $20}'
+}
+
+# Alive, and the same process that wrote the file -- PIDs get reused, and a
+# crashed session can leave its json behind. Claude Code itself gates on this.
+is_live() {
+    [ -n "$2" ] || return 1
+    [ "$(starttime_of "$1")" = "$2" ]
+}
+
+# --- sway ------------------------------------------------------------------
+# Fetched at most once per run, and only when something actually needs a window:
+# the waybar path polls every few seconds and never resolves one, so querying the
+# tree up front would be the most expensive thing it did. Keyed pid -> record.
+# The con_id is the part that identifies a window -- .pid is not unique, one app
+# can own several windows -- and app_id and title ride along because the menu
+# labels each row with the window you will land in, not just its id.
+WINDOWS= WINDOWS_LOADED=
+load_windows() {
+    [ -n "$WINDOWS_LOADED" ] && return
+    WINDOWS_LOADED=1
+    WINDOWS=$(swaymsg -t get_tree 2>/dev/null \
+              | jq -r --arg us "$US" 'recurse(.nodes[]?, .floating_nodes[]?)
+                       | select(.pid != null and (.app_id != null or .window_properties != null))
+                       | [(.pid|tostring), (.id|tostring),
+                          (.app_id // .window_properties.class // ""), (.name // "")]
+                       | join($us)' 2>/dev/null)
+}
+
+# pid -> "con_id<US>app_id<US>title". US again rather than tab, and for the same
+# reason as above: a window with an empty app_id must not shift its title left.
+win_for_pid() {
+    load_windows
+    printf '%s\n' "$WINDOWS" | awk -F"$US" -v p="$1" '$1==p{print $2 FS $3 FS $4; exit}'
+}
+
+# Walk up until a parent owns a window. Bounded, so a cycle or a /proc race
+# cannot spin forever.
+win_for_ancestry() {
+    p=$1 n=0
+    while [ -n "$p" ] && [ "$p" -gt 1 ] 2>/dev/null && [ "$n" -lt 40 ]; do
+        w=$(win_for_pid "$p")
+        [ -n "$w" ] && { printf '%s\n' "$w"; return 0; }
+        p=$(ppid_of "$p"); n=$((n + 1))
+    done
+    return 1
+}
+
+# A tmux pane's ancestry ends at the detached tmux server, not at a window. The
+# window we want is whichever terminal has a CLIENT attached to that session, so
+# go via the client's controlling tty.
+win_for_tmux() {
+    sess=${1%%:*}
+    tty=$(tmux list-clients -F '#{client_tty} #{client_session}' 2>/dev/null \
+          | awk -v s="$sess" '$2==s{print $1; exit}')
+    [ -n "$tty" ] || return 1
+    for d in /proc/[0-9]*; do
+        [ "$(readlink "$d/fd/0" 2>/dev/null)" = "$tty" ] || continue
+        win_for_ancestry "${d#/proc/}" && return 0
+    done
+    return 1
+}
+
+# Focusing only ever needs the first field. Written as an assignment rather than
+# a `| cut` so the lookup's failure is still this function's exit status -- cut
+# succeeds on empty input, which would make "no window" look like a hit.
+con_for_ancestry() { w=$(win_for_ancestry "$1") || return 1; printf '%s\n' "${w%%"$US"*}"; }
+con_for_tmux()     { w=$(win_for_tmux     "$1") || return 1; printf '%s\n' "${w%%"$US"*}"; }
+
+# The label for a row: the name of the window it will focus.
+#
+# named-term locks its terminals to "<adjective> <animal> - <cwd>", and that name
+# is also what $mod+o lists, so reusing it here makes the two pickers agree --
+# whatever this says is what you will find yourself looking at.
+#
+# Every other title drifts: a plain foot follows the shell's precmd hook, an
+# editor hosting a session in a built-in terminal follows the open buffer. So a
+# title is trusted only while it still looks locked -- exactly two all-lowercase
+# words before the separator -- and anything else falls back to the app id, which
+# at least says what kind of window to expect. A drifting title would otherwise
+# be worse than no label at all: it reads as an identity while naming whatever
+# happened to be in the foreground when the tree was fetched.
+window_label() {  # app_id, title -> label (empty if neither is usable)
+    head=${2%% - *}
+    case "$head" in
+        *[!a-z\ ]*|*\ *\ *|\ *|*\ ) ;;             # not two plain lowercase words
+        ?*\ ?*) printf '%s\n' "$head"; return 0 ;;
+    esac
+    printf '%s' "${1##*.}" | tr '[:upper:]' '[:lower:]'  # dev.zed.Zed -> zed
+    printf '\n'
+}
+
+# The window a row lives in, as "con_id<US>app_id<US>title". tmux first: a
+# session in a pane has no window of its own in the ancestry sense.
+win_for_row() {  # pid, tmux-location
+    [ -n "$2" ] && { win_for_tmux "$2"; return; }
+    win_for_ancestry "$1"
+}
+
+label_for_row() {  # pid, tmux-location
+    w=$(win_for_row "$1" "$2") || return 1
+    rest=${w#*"$US"}
+    window_label "${rest%%"$US"*}" "${rest#*"$US"}"
+}
+
+# --- transcript ------------------------------------------------------------
+transcript_for() {  # cwd, sessionId
+    d=$(printf '%s' "$1" | sed 's|/|-|g')
+    t="$PROJECTS/$d/$2.jsonl"
+    [ -r "$t" ] && { printf '%s\n' "$t"; return 0; }
+    # The "/" -> "-" mangling is an assumption about characters that happen not
+    # to appear in these paths; fall back to locating the file by session id.
+    find "$PROJECTS" -maxdepth 2 -name "$2.jsonl" 2>/dev/null | head -1
+}
+
+# Context window in use = the last message's input + both cache figures.
+# Read backwards: transcripts reach several MB, and a full jq pass over one
+# costs ~3x this and grows with the file, while this stays O(tail).
+context_of() {
+    [ -s "$1" ] || return 1
+    tac "$1" 2>/dev/null | grep -m1 '"usage"' \
+        | jq -r '.message.usage
+                 | (.input_tokens // 0) + (.cache_read_input_tokens // 0)
+                   + (.cache_creation_input_tokens // 0)' 2>/dev/null
+}
+
+human_age() {  # seconds -> compact
+    s=$1
+    if   [ "$s" -lt 60 ]    ; then printf '%ds' "$s"
+    elif [ "$s" -lt 3600 ]  ; then printf '%dm' $(( s / 60 ))
+    elif [ "$s" -lt 86400 ] ; then printf '%dh' $(( s / 3600 ))
+    else                           printf '%dd' $(( s / 86400 ))
+    fi
+}
+
+# --- enumeration -----------------------------------------------------------
+# Emits, US-separated:
+#   rank status pid name cwd age tmux waiting sid supd job kind bg
+# rank orders the menu: anything unrecognised first (requires_action, i.e. a
+# session blocked on a permission prompt, wants you more urgently than one that
+# merely finished), then ready, then working.
+enumerate() {
+    now=$(date +%s)
+    # One jq for every session file rather than one per file: jq startup dominates
+    # this path, and the waybar module re-runs it every few seconds. input_filename
+    # carries the pid, which lives in the name rather than the record.
+    jq -r --arg us "$US" '
+        input_filename as $f
+        | [($f | sub(".*/"; "") | sub("\\.json$"; "")),
+           (.procStart // ""), (.status // "?"), (.name // ""),
+           (.cwd // ""), (.statusUpdatedAt // .startedAt // 0),
+           (.tmux // ""), (.waitingFor // .detail // ""), (.sessionId // ""),
+           (.jobId // .parkedJobId // ""), (.kind // "")]
+        | join($us)' "$SESSIONS"/*.json 2>/dev/null \
+    | while IFS=$US read -r pid pstart status name cwd supd tmx waiting sid job kind; do
+        case "$pid" in ''|*[!0-9]*) continue ;; esac
+        is_live "$pid" "$pstart" || continue
+
+        case "$status" in
+            idle)         rank=1 ;;
+            busy|running) rank=2 ;;
+            *)            rank=0 ;;
+        esac
+        [ -n "$name" ] || name=$(basename "$cwd")
+        age=$(human_age $(( now - supd / 1000 )))
+
+        printf '%s\n' "$rank$US$status$US$pid$US$name$US$cwd$US$age$US$tmx$US$waiting$US$sid$US$supd$US$job$US$kind"
+    # Folded (see below), then ordered: rank ascending, and most-recently-changed
+    # first within a rank. Sorting on the humanised age would compare "3d"
+    # against "49s" as text.
+    done \
+    | awk -F"$US" -v OFS="$US" '
+        # Park a session ($mod-whatever sends it to the background) and Claude
+        # Code keeps TWO records: the interactive one, now holding a parkedJobId,
+        # and a kind=bg one carrying the same id as its jobId. They are one piece
+        # of work, they share a name, and the bg record owns no window of its
+        # own -- so listing both gave two identical-looking rows, one of which
+        # focused nothing. Fold the bg row into its host and flag the host as
+        # carrying background work.
+        { row[NR] = $0; rank[NR] = $1 + 0; job[NR] = $11; kind[NR] = $12
+          if ($11 != "") { if ($12 == "bg") bg[$11] = NR; else host[$11] = NR } }
+        END {
+            for (i = 1; i <= NR; i++) {
+                j = job[i]
+                if (j != "" && kind[i] == "bg" && (j in host)) continue
+                $0 = row[i]
+                $13 = (kind[i] == "bg" || (j != "" && (j in bg))) ? "bg" : ""
+                # The status shown is the more urgent of the pair: while you are
+                # parked it is the bg job that is actually working, or actually
+                # blocked on a prompt, and that is the thing worth knowing.
+                if (j != "" && kind[i] != "bg" && (j in bg) && rank[bg[j]] < rank[i]) {
+                    split(row[bg[j]], f, FS)
+                    $1 = f[1]; $2 = f[2]; $8 = f[8]
+                }
+                print
+            }
+        }' \
+    | sort -t"$US" -k1,1n -k10,10nr
+}
+
+# --- focusing --------------------------------------------------------------
+focus() {  # pid, tmux-location
+    if [ -n "$2" ]; then
+        con=$(con_for_tmux "$2") || return 1
+        swaymsg "[con_id=$con] focus" >/dev/null 2>&1 || return 1
+        # "session:@window.%pane" -- select both, so a multi-pane window lands right.
+        rest=${2#*:}; win=${rest%%.*}; pane=${rest#*.}
+        tmux select-window -t "${2%%:*}:$win" >/dev/null 2>&1
+        tmux select-pane   -t "$pane"        >/dev/null 2>&1
+        return 0
+    fi
+    con=$(con_for_ancestry "$1") || return 1
+    swaymsg "[con_id=$con] focus" >/dev/null 2>&1
+}
+
+short_cwd() {
+    case "$1" in
+        "$HOME")   printf '~' ;;
+        "$HOME"/*) printf '~%s' "${1#"$HOME"}" ;;
+        *)         printf '%s' "$1" ;;
+    esac
+}
+
+# --- commands --------------------------------------------------------------
+case "${1:-menu}" in
+    list)
+        printf 'STATUS\tWINDOW\tPID\tNAME\tCWD\tAGE\tCTX\tWHERE\n'
+        enumerate | while IFS=$US read -r rank status pid name cwd age tmx waiting sid supd job kind bgf; do
+            t=$(transcript_for "$cwd" "$sid")
+            ctx=$(context_of "$t") || ctx=""
+            label=$(label_for_row "$pid" "$tmx") || label=""
+            # A tmux session with no client attached resolves to no window, but
+            # saying where it lives is still the useful half of the answer.
+            if w=$(win_for_row "$pid" "$tmx"); then where="con ${w%%"$US"*}${tmx:+ tmux $tmx}"
+            elif [ -n "$tmx" ]; then where="tmux $tmx (detached)"
+            else where="-"
+            fi
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+                "$status${bgf:+/bg}" "${label:--}" "$pid" "$name" \
+                "$(short_cwd "$cwd")" "$age" \
+                "${ctx:+$(( (ctx + 500) / 1000 ))k}" "$where"
+        done
+        ;;
+
+    waybar)
+        # Polled path: only the small per-PID jsons, never a transcript.
+        #
+        # This is also where the ready-transition notification lives, because it
+        # is the only thing running on a timer. SEEN records what each session's
+        # rank was last poll, so a notification fires on the EDGE from working to
+        # wanting you, not on every poll where something happens to be idle.
+        #
+        # Two cases must stay silent, and both need that per-pid history rather
+        # than a simple "is anything ready" check:
+        #   - the first poll after waybar starts, when every already-idle session
+        #     would otherwise announce itself at once;
+        #   - a session you just opened, which is idle from birth and has never
+        #     been working.
+        # Both fall out of the same rule: notify only when this pid was seen
+        # before AND was working then.
+        prev=$(cat "$SEEN" 2>/dev/null)
+        cur=' '                                    # leading space: see the lookup below
+
+        ready=0 action=0 total=0
+        while IFS=$US read -r rank status pid name cwd age tmx waiting sid supd job kind bgf; do
+            [ -n "$pid" ] || continue
+            total=$(( total + 1 ))
+            [ "$rank" -eq 1 ] && ready=$(( ready + 1 ))
+            [ "$rank" -eq 0 ] && action=$(( action + 1 ))
+            cur="$cur$pid:$rank "
+
+            [ "$rank" -eq 2 ] && continue          # still working, nothing to say
+            # Matched on " <pid>:" with the space, not on "<pid>:" alone --
+            # a bare substring match would find pid 1234 inside an entry for
+            # 51234 and read someone else's rank. Every entry is space-delimited
+            # on both sides, so the trailing "%% *" always finds its terminator.
+            case "$prev" in
+                *" $pid:"*) was=${prev##*" $pid":}; was=${was%% *} ;;
+                *)          continue ;;            # never seen: stay quiet
+            esac
+            # Any CHANGE into a wants-you rank, not just one arriving from
+            # rank 2. Polls are seconds apart, so a session can go idle ->
+            # working -> blocked-on-a-prompt between two of them; keying on
+            # "came from working" would swallow that permission prompt entirely.
+            [ "$was" != "$rank" ] || continue      # unchanged: already said so
+
+            # A blocked session gets critical, which in this dunstrc means
+            # timeout 0 -- it stays up until dismissed ($mod+n), and outranks
+            # do-not-disturb. That is the point: it is blocking, and if you are
+            # away from the desk it must still be there when you get back. The
+            # cost is that it lingers after you have answered the prompt, since
+            # nothing closes it. Drop it to normal if you would rather it faded.
+            if [ "$rank" -eq 0 ]; then
+                urg=critical; head="Claude needs you"; detail="${waiting:-$status}"
+            else
+                urg=normal;   head="Claude ready";     detail="waiting for input"
+            fi
+            # A stack tag per pid, so several sessions finishing do not collapse
+            # into one another the way a shared tag would.
+            notify-send -a claude -u "$urg" \
+                -h "string:x-dunst-stack-tag:claude-session-$pid" \
+                "$head" "$name - $detail
+$(short_cwd "$cwd")"
+        done <<EOF
+$(enumerate)
+EOF
+
+        # Written atomically, and only ever holding live pids, so an exited
+        # session cannot leave a rank behind for a future pid to inherit.
+        tmp="$SEEN.$$"
+        printf '%s\n' "$cur" > "$tmp" && mv -f "$tmp" "$SEEN"
+
+        if   [ "$action" -gt 0 ]; then cls=claude-action; txt="!$action"
+        elif [ "$ready"  -gt 0 ]; then cls=claude-ready;  txt="●$ready"
+        else                           cls=claude-none;   txt="●0"
+        fi
+        printf '{"text":"%s","tooltip":"%s of %s Claude session(s) ready","class":["%s"]}\n' \
+            "$txt" "$ready" "$total" "$cls"
+        ;;
+
+    menu)
+        rows=$(enumerate)
+        [ -n "$rows" ] || { notify-send -a claude -u low -t 3000 \
+            -h string:x-dunst-stack-tag:claude-sessions \
+            'Claude sessions' 'None running'; exit 0; }
+
+        # Resolved first, formatted second. The leading column is the WINDOW's
+        # name -- the thing you are actually picking, and the same string $mod+o
+        # shows -- so no column width is known until every row has one. The sway
+        # tree is cached, so this stays one swaymsg call however many rows there
+        # are.
+        rich=''
+        while IFS=$US read -r rank status pid name cwd age tmx waiting sid supd job kind bgf; do
+            [ -n "$pid" ] || continue
+            label=$(label_for_row "$pid" "$tmx") || label=""
+            t=$(transcript_for "$cwd" "$sid")
+            ctx=$(context_of "$t") || ctx=""
+            rich="$rich$rank$US$status$US$pid$US$name$US$cwd$US$age$US$tmx$US$waiting$US$bgf$US${label:--}$US$ctx
+"
+        done <<EOF
+$rows
+EOF
+
+        # Two parallel lists: what rofi shows, and the pid/tmux it maps to.
+        # -format i returns the chosen INDEX, so nothing has to be parsed back
+        # out of a decorated display string.
+        # Widths of the two name columns, so they line up (rofi's default font
+        # is "mono 12", so padding with spaces actually aligns). Both labels are
+        # ASCII -- a locked title's two lowercase words, or an app id -- so
+        # awk's byte length is their column width.
+        colw() { printf '%s' "$rich" | cut -d"$US" -f"$1" \
+                 | awk -v d="$2" '{ if (length > m) m = length } END { print (m > 0 ? m : d) }'; }
+        wl=$(colw 10 12)
+        wn=$(colw 4 12)
+
+        menu='' keys=''
+        while IFS=$US read -r rank status pid name cwd age tmx waiting bgf label ctx; do
+            [ -n "$pid" ] || continue
+            case "$rank" in
+                1) mark='<span foreground="#8ec07c">●</span>'; word=ready ;;
+                2) mark='<span foreground="#5c5c5c">◐</span>'; word=working ;;
+                *) mark='<span foreground="#d79921">!</span>'; word=$status ;;
+            esac
+            extra=$(short_cwd "$cwd")
+            [ -n "$tmx" ] && extra="$extra  <i>tmux</i>"
+            [ -n "$bgf" ] && extra="$extra  <i>bg</i>"
+            [ -n "$waiting" ] && extra="$extra  <i>$waiting</i>"
+            # Pango markup must wrap the already-padded text: padding inside a
+            # tag still counts, but the name has to be padded before it is bolded
+            # or the trailing spaces land outside the column.
+            padded=$(printf '%-*s' "$wl" "$label")
+            # The session's own name stays, one column right and dimmed: it is
+            # what `claude` calls itself and what a notification says, so losing
+            # it would break the link between the two.
+            line=$(printf '%s <b>%s</b>  <span foreground="#5c5c5c">%-*s  %-7s %6s %8s  %s</span>' \
+                   "$mark" "$padded" "$wn" "$name" "$word" "$age" \
+                   "${ctx:+$(( (ctx + 500) / 1000 ))k ctx}" "$extra")
+            menu="$menu$line
+"
+            keys="$keys$pid	$tmx
+"
+        done <<EOF
+$rich
+EOF
+
+        idx=$(printf '%s' "$menu" | rofi -dmenu -i -markup-rows -format i \
+                  -p claude -no-custom) || exit 0
+        [ -n "$idx" ] || exit 0
+
+        sel=$(printf '%s' "$keys" | sed -n "$(( idx + 1 ))p")
+        pid=$(printf '%s' "$sel" | cut -f1)
+        tmx=$(printf '%s' "$sel" | cut -f2)
+        [ -n "$pid" ] || exit 0
+
+        focus "$pid" "$tmx" || notify-send -a claude -u normal -t 4000 \
+            -h string:x-dunst-stack-tag:claude-sessions \
+            'Claude sessions' "No window found for pid $pid${tmx:+ (tmux $tmx, no client attached?)}"
+        ;;
+
+    *)
+        echo "usage: claude-sessions [list|menu|waybar]" >&2
+        exit 1
+        ;;
+esac

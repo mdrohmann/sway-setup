@@ -1,0 +1,346 @@
+/* Waybar styling -- ports the swaybar colours from ~/.config/sway/config.
+ *
+ * Your `colors { }` block set statusline #ffffff, background #323232 and
+ * inactive_workspace #32323200 #32323200 #5c5c5c; the focused, urgent and
+ * binding-mode colours below are sway's own defaults, which you had inherited.
+ *
+ * Waybar ships an opinionated default theme (rounded corners, gradients,
+ * a fade animation); the reset in `*` strips it back to swaybar's flat look. */
+
+* {
+    /* swaybar's `monospace 10`. FontAwesome is listed so the battery
+     * glyphs resolve explicitly rather than relying on fontconfig
+     * fallback -- DejaVu Sans Mono has nothing in the U+F2xx range. */
+    font-family: "DejaVu Sans Mono", "FontAwesome", monospace;
+    font-size: 10pt;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+    text-shadow: none;
+    min-height: 0;
+}
+
+window#waybar {
+    background: #323232;
+    color: #ffffff;
+}
+
+/* Workspace buttons. Every state carries the same 1px border so the buttons
+ * keep an identical height as focus moves between them. */
+#workspaces button {
+    padding: 0 8px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: #5c5c5c;                 /* inactive_workspace text */
+}
+
+#workspaces button.visible {        /* sway's active_workspace: focused on
+                                     * another output */
+    border-color: #333333;
+    background: #5f676a;
+    color: #ffffff;
+}
+
+#workspaces button.focused {
+    border-color: #4c7899;
+    background: #285577;
+    color: #ffffff;
+}
+
+#workspaces button.urgent {
+    border-color: #2f343a;
+    background: #900000;
+    color: #ffffff;
+}
+
+/* Binding-mode indicator ($mod+r). sway's binding_mode colours. */
+#mode {
+    padding: 0 8px;
+    border: 1px solid #2f343a;
+    background: #900000;
+    color: #ffffff;
+}
+
+#tray {
+    padding: 0 4px;                 /* swaybar's tray_padding 4 */
+}
+
+/* An applet asking for attention (NeedsAttention status). */
+#tray > .needs-attention {
+    background: #900000;
+}
+
+/* Battery. Escalation reuses the palette already in this file rather than
+ * inventing new colours: critical borrows the urgent/binding-mode red, so a
+ * flat empty battery reads the same as an urgent workspace. Amber for warning
+ * is the one addition -- swaybar had no equivalent state. No animation, to
+ * stay consistent with the theme reset at the top. */
+#battery {
+    padding: 0 8px;
+    color: #ffffff;                 /* statusline */
+}
+
+/* .warning and .critical come from the `states` block in config. */
+#battery.warning {
+    color: #d79921;
+}
+
+#battery.critical {
+    background: #900000;
+    color: #ffffff;
+}
+
+/* Charging outranks the capacity states: plugged in at 8% is not a problem,
+ * so drop the red while power is actually going in. */
+#battery.charging.critical,
+#battery.charging.warning {
+    background: transparent;
+    color: #ffffff;
+}
+
+/* CPU, memory, temperature, bluetooth. Same flat treatment as everything
+ * else: white on the bar background, escalating to the amber introduced for
+ * the battery warning and then to the urgent red already in this palette. */
+#cpu,
+#memory,
+#temperature,
+#bluetooth {
+    padding: 0 8px;
+    color: #ffffff;                 /* statusline */
+}
+
+/* .warning/.critical on cpu and memory come from their `states` blocks; for
+ * every module except battery a state activates at or ABOVE its value, so
+ * these fire on high load rather than low. temperature has its own
+ * warning-threshold/critical-threshold keys but the same class names. */
+#cpu.warning,
+#memory.warning,
+#temperature.warning {
+    color: #d79921;
+}
+
+#cpu.critical,
+#memory.critical,
+#temperature.critical {
+    background: #900000;
+    color: #ffffff;
+}
+
+/* An adapter that is off or rfkilled is not a fault, just inactive: grey it
+ * like an inactive workspace rather than competing for attention. */
+#bluetooth.off,
+#bluetooth.disabled {
+    color: #5c5c5c;
+}
+
+/* Privacy. The module only draws while the mic is open or a screencast is
+ * running, so it should read as an alert whenever it is visible at all. Note
+ * the styling hangs off #privacy-item, not #privacy -- the outer widget is
+ * just a container. */
+#privacy {
+    padding: 0;
+}
+
+#privacy-item {
+    padding: 0 8px;
+    background: #900000;
+    color: #ffffff;
+}
+
+#clock {
+    padding: 0 10px;
+    color: #ffffff;                 /* statusline */
+}
+
+/* Pomodoro. The glyph ripens through three stages -- seedling, leafy plant,
+ * tomato -- and gets one step more visible every thirtieth of the session, then
+ * blinks once the time is up. The JSON contract is in ~/.local/bin/pomodoro.
+ *
+ * m0..m29 are THIRTIETHS, not minutes: ten steps per ripening stage. They line
+ * up with minutes only at the default 30-minute session (~/.config/pomodoro.conf);
+ * at any other length the same 30 rules simply stretch, so nothing here needs
+ * to change when that setting does.
+ *
+ * Two things about these numbers are worth knowing before editing them.
+ *
+ * First, the fade is `opacity`, not `color`. Noto Color Emoji is a colour bitmap
+ * font, so a CSS colour has no effect on these glyphs at all -- opacity is the
+ * only handle GTK gives us. Hence one class per minute.
+ *
+ * Second, the values are NOT a straight 0..1 ramp, because the three glyphs are
+ * not equally bright against this bar's #323232. Measured at full opacity, their
+ * contrast is seedling 5.94, herb 5.01, tomato 9.30. A naive shared ramp
+ * therefore goes BACKWARDS at a stage boundary: the herb at minute 12 came out
+ * dimmer than the seedling at minute 0, which is exactly the opposite of what
+ * the widget is for. Each value below is instead target_contrast / that glyph's
+ * own ceiling, so perceived visibility rises monotonically across all 30
+ * minutes. The herb's 5.01 ceiling is the binding constraint -- it is the
+ * dimmest glyph, so the seedling stage is deliberately capped at 0.353 rather
+ * than being allowed to reach full opacity and overshoot what the herb can
+ * match. Re-derive with the tooling noted in the plan if you change a glyph. */
+#custom-pomodoro {
+    padding: 0 8px;
+    /* Emoji family first: the bar's stack (DejaVu Sans Mono, FontAwesome) has
+     * nothing in the U+1F3xx range and would render tofu boxes. */
+    font-family: "Noto Color Emoji", "DejaVu Sans Mono", monospace;
+}
+
+/* Nothing running. Below the minute-0 floor, so an idle bar reads as idle. */
+#custom-pomodoro.pomo-idle { opacity: 0.100; }
+
+/* seedling -- capped at 0.353; see the note above */
+#custom-pomodoro.pomo-m0 { opacity: 0.185; }
+#custom-pomodoro.pomo-m1 { opacity: 0.188; }
+#custom-pomodoro.pomo-m2 { opacity: 0.196; }
+#custom-pomodoro.pomo-m3 { opacity: 0.208; }
+#custom-pomodoro.pomo-m4 { opacity: 0.224; }
+#custom-pomodoro.pomo-m5 { opacity: 0.244; }
+#custom-pomodoro.pomo-m6 { opacity: 0.266; }
+#custom-pomodoro.pomo-m7 { opacity: 0.292; }
+#custom-pomodoro.pomo-m8 { opacity: 0.321; }
+#custom-pomodoro.pomo-m9 { opacity: 0.353; }
+
+/* leafy -- dimmest glyph, so it runs nearly to full opacity */
+#custom-pomodoro.pomo-m10 { opacity: 0.460; }
+#custom-pomodoro.pomo-m11 { opacity: 0.505; }
+#custom-pomodoro.pomo-m12 { opacity: 0.554; }
+#custom-pomodoro.pomo-m13 { opacity: 0.606; }
+#custom-pomodoro.pomo-m14 { opacity: 0.661; }
+#custom-pomodoro.pomo-m15 { opacity: 0.719; }
+#custom-pomodoro.pomo-m16 { opacity: 0.781; }
+#custom-pomodoro.pomo-m17 { opacity: 0.846; }
+#custom-pomodoro.pomo-m18 { opacity: 0.913; }
+#custom-pomodoro.pomo-m19 { opacity: 0.984; }
+
+/* tomato -- brightest glyph, so it starts low again */
+#custom-pomodoro.pomo-m20 { opacity: 0.570; }
+#custom-pomodoro.pomo-m21 { opacity: 0.611; }
+#custom-pomodoro.pomo-m22 { opacity: 0.655; }
+#custom-pomodoro.pomo-m23 { opacity: 0.699; }
+#custom-pomodoro.pomo-m24 { opacity: 0.745; }
+#custom-pomodoro.pomo-m25 { opacity: 0.793; }
+#custom-pomodoro.pomo-m26 { opacity: 0.843; }
+#custom-pomodoro.pomo-m27 { opacity: 0.894; }
+#custom-pomodoro.pomo-m28 { opacity: 0.946; }
+#custom-pomodoro.pomo-m29 { opacity: 1.000; }
+
+/* Past 30 minutes. The script alternates these two every second, which is what
+ * produces the blink -- no CSS animation, in keeping with the theme reset at
+ * the top of this file. */
+#custom-pomodoro.pomo-done     { opacity: 1.000; }
+#custom-pomodoro.pomo-done-off { opacity: 0.100; }
+
+/* Paused. Rides on top of whichever minute/done class is already set, so it
+ * only marks the pause: half the current opacity, plus the amber already used
+ * for the battery and cpu warning states. Emoji ignore `color`, so the amber
+ * has to arrive as a border rather than as text colour. */
+#custom-pomodoro.pomo-paused {
+    opacity: 0.400;
+    border-bottom: 2px solid #d79921;
+}
+
+/* Claude sessions. Count of sessions that have finished and are waiting on you;
+ * click to open the picker. Colours are the ones already in this file rather
+ * than new ones: white when something wants you, the inactive-workspace grey
+ * when nothing does, and the battery/cpu warning amber for a session blocked on
+ * a permission prompt -- that outranks a merely-finished one. */
+#custom-claude {
+    padding: 0 8px;
+    color: #ffffff;                 /* statusline */
+}
+
+/* Nothing waiting: recede, like an inactive workspace. */
+#custom-claude.claude-none {
+    color: #5c5c5c;
+}
+
+/* A session is blocked asking for something. */
+#custom-claude.claude-action {
+    color: #d79921;
+}
+
+/* Slack (U+F198 fa-slack). White while running and quiet, like every other
+ * always-present module here; the warning amber when something is addressed to
+ * you; the inactive grey only when Slack is not running, the same way
+ * #bluetooth.off marks an adapter that is switched off.
+ *
+ * Quiet was #5c5c5c at first, which turned out to be effectively invisible at
+ * this glyph's size against #323232 -- it read as a missing module rather than
+ * a calm one. The icon stays drawn while Slack is closed so there is still
+ * something to click to start it. */
+#custom-slack {
+    padding: 0 8px;
+    color: #ffffff;                 /* statusline */
+}
+
+#custom-slack.slack-mention {
+    color: #d79921;
+}
+
+#custom-slack.slack-gone {
+    color: #5c5c5c;
+}
+
+/* Gmail (U+F0E0 fa-envelope). The same three states as Slack above, in the same
+ * colours and for the same reasons, plus one modifier.
+ *
+ * .gmail-stale means the number is REMEMBERED rather than observed: Gmail drops
+ * the count from its title as soon as you open a message, and the alternative to
+ * a dimmed stale number was the count blanking for as long as you sat reading.
+ * It rides on top of the state class the way .pomo-paused does, so it needs no
+ * rule per state. Half opacity and no colour change, because it is the same
+ * number, just held less confidently. */
+#custom-gmail {
+    padding: 0 8px;
+    color: #ffffff;                 /* statusline */
+}
+
+#custom-gmail.gmail-unread {
+    color: #d79921;
+}
+
+#custom-gmail.gmail-gone {
+    color: #5c5c5c;
+}
+
+#custom-gmail.gmail-stale {
+    opacity: 0.55;
+}
+
+/* The "slack" and "mail" workspaces. Hidden from the workspace list unless they
+ * want you: ~/.local/bin/webapp sets a window's sway urgency flag from its unread
+ * count, waybar renders an urgent workspace as button.urgent, and these two rules
+ * turn that into visible/not. CSS cannot read a window title, so the urgency flag
+ * is the bridge between the two.
+ *
+ * Both workspaces share the rules rather than getting a block each: the reasoning
+ * below is the valuable part, and two copies of it would drift. On "mail" only
+ * Gmail drives the flag -- Calendar has no count and never asks for you -- so
+ * that button follows the inbox alone.
+ *
+ * GTK has no display:none, so "hidden" means collapsed: zero width, zero
+ * padding, no border. font-size goes to 0 as well, since a GtkButton will not
+ * shrink below the size of the text inside it however little padding it has.
+ * It is still shown while focused or visible, so switching there with $mod+c
+ * does not make the button you are standing on vanish. */
+#workspaces button#sway-workspace-slack,
+#workspaces button#sway-workspace-mail {
+    min-width: 0;
+    padding: 0;
+    margin: 0;
+    border: none;
+    font-size: 0;
+    opacity: 0;
+}
+
+#workspaces button#sway-workspace-slack.urgent,
+#workspaces button#sway-workspace-slack.focused,
+#workspaces button#sway-workspace-slack.visible,
+#workspaces button#sway-workspace-mail.urgent,
+#workspaces button#sway-workspace-mail.focused,
+#workspaces button#sway-workspace-mail.visible {
+    padding: 0 8px;
+    border: 1px solid transparent;
+    font-size: 10pt;
+    opacity: 1;
+}

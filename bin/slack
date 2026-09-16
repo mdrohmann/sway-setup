@@ -1,0 +1,11 @@
+#!/bin/sh
+# Slack, as a Chrome app window on a workspace of its own.
+#
+# Kept as a command rather than deleted: $mod+c in ~/.config/sway/config and the
+# custom/slack module in ~/.config/waybar/config both name this path, and neither
+# should have to change for a refactor that is internal to the implementation.
+#
+# That implementation is ~/.local/bin/webapp, shared with Gmail and Calendar;
+# Slack is one row of its table. "$@" with no arguments is correct -- webapp's
+# own default is toggle.
+exec "${0%/*}/webapp" slack "$@"

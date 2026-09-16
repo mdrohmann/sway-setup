@@ -1,0 +1,6 @@
+# Timestamped backups made by hand before risky edits. They are noise here;
+# git is the history now.
+*.bak-*
+
+# Left behind by install.sh when it moves an existing config out of the way.
+*.pre-sway-setup-*

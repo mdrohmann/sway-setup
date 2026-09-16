@@ -1,0 +1,44 @@
+#!/bin/sh
+# Adjust or query the display backlight, with a dunst OSD.
+# Usage: brightness up|down|show [STEP]
+#
+# Mirrors ~/.local/bin/volume: same stack tag pattern, same -h int:value
+# progress bar, so the two OSDs look and behave alike.
+
+STEP="${2:-5}"
+MIN_PCT=5   # never step down to a fully black screen
+
+# brightnessctl -m prints: name,class,current,percent,max
+read_state() { brightnessctl -m | cut -d, -f"$1"; }
+
+# -n takes a RAW minimum, not a percentage, so derive it from max.
+max=$(read_state 5)
+min=$(( max * MIN_PCT / 100 ))
+
+case "$1" in
+    # stderr is silenced: the permission case is reported in the OSD below,
+    # and without this every keypress logs a root-privileges hint to sway.
+    up)   brightnessctl -q -n"$min" set "${STEP}%+" 2>/dev/null ;;
+    down) brightnessctl -q -n"$min" set "${STEP}%-" 2>/dev/null ;;
+    show) ;;
+    *)    echo "usage: brightness up|down|show [step]" >&2; exit 1 ;;
+esac
+
+notify() {
+    notify-send -a brightness -u low \
+        -h string:x-dunst-stack-tag:brightness \
+        -h "int:value:$1" \
+        -i display-brightness-symbolic "$2"
+}
+
+pct=$(read_state 4 | tr -d '%')
+dev=$(read_state 1)
+
+# The sysfs node is root:video g+w, so the write only works once the session
+# carries the video group. A session started before the group was granted
+# silently no-ops -- say so rather than flashing an unchanged percentage.
+if [ ! -w "/sys/class/backlight/$dev/brightness" ]; then
+    notify "$pct" "Brightness ${pct}% -- log out and back in to enable control"
+else
+    notify "$pct" "Brightness ${pct}%"
+fi

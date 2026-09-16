@@ -1,0 +1,59 @@
+#!/bin/sh
+# Keep the two Wayland selections in sync:
+#   PRIMARY   -- filled by selecting text, pasted with middle-click
+#   CLIPBOARD -- filled by Ctrl+C, pasted with Ctrl+V
+#
+# Usage: clip-sync [both|primary-to-clipboard|clipboard-to-primary]
+#
+# Text only: images and other binary types are left alone, so copying a
+# picture isn't mangled by passing through a shell variable.
+#
+# Echo suppression: both watchers share one "last synced value" file. A
+# mirrored write lands in the other selection and immediately wakes the
+# opposite watcher; that echo carries the value we just recorded, so it is
+# dropped. Comparing against the live selection instead would be racy --
+# wl-copy takes ~0.2s, long enough for two watchers to trade stale values
+# back and forth indefinitely.
+
+SELF=$(readlink -f "$0")
+STATE="${XDG_RUNTIME_DIR:-/tmp}/clip-sync.last"
+
+last_synced() { cat "$STATE" 2>/dev/null; }
+
+remember() {  # write atomically; concurrent handlers must never see a partial file
+    tmp="$STATE.$$"
+    printf '%s' "$1" > "$tmp" && mv -f "$tmp" "$STATE"
+}
+
+# --type text/plain skips wl-copy's xdg-mime sniffing, which forks perl.
+mirror() {
+    new=$(cat)
+    [ -n "$new" ] || exit 0
+    [ "$new" = "$(last_synced)" ] && exit 0
+    remember "$new"
+    printf '%s' "$new" | wl-copy --type text/plain "$@"
+}
+
+case "${1:-both}" in
+    _to-clipboard) mirror ;;
+    _to-primary)   mirror --primary ;;
+
+    primary-to-clipboard)
+        rm -f "$STATE"
+        exec wl-paste --primary --type text --watch "$SELF" _to-clipboard
+        ;;
+    clipboard-to-primary)
+        rm -f "$STATE"
+        exec wl-paste --type text --watch "$SELF" _to-primary
+        ;;
+    both)
+        rm -f "$STATE"
+        wl-paste --primary --type text --watch "$SELF" _to-clipboard &
+        wl-paste           --type text --watch "$SELF" _to-primary  &
+        wait
+        ;;
+    *)
+        echo "usage: clip-sync [both|primary-to-clipboard|clipboard-to-primary]" >&2
+        exit 1
+        ;;
+esac

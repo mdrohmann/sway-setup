@@ -1,0 +1,174 @@
+#!/bin/sh
+# Pomodoro timer for the waybar `custom/pomodoro` module.
+#
+# Usage: pomodoro [waybar|toggle|reset|stop]
+#
+# The tomato ripens as the session runs -- a seedling for the first third, a
+# leafy plant for the second, a tomato for the last -- and fades in ten steps
+# inside each stage, so elapsed time is readable at a glance without reading
+# digits. When the session is up it blinks, forever, until you reset it.
+#
+# The session length is MINUTES, settable in ~/.config/pomodoro.conf.
+#
+# The fade is CSS `opacity`, not `color`: Noto Color Emoji is a colour bitmap
+# font, so a CSS colour cannot tint these glyphs at all. Hence the
+# pomo-m0..pomo-m29 classes in style.css.
+#
+# Those 30 classes are THIRTIETHS OF A SESSION, not minutes -- ten steps within
+# each of the three ripening stages. At the default 30 minutes the two coincide,
+# which is where the names came from; at any other length the ramp simply
+# stretches, and style.css needs no edit. What must hold is that the class is
+# derived from progress through a stage, never from an absolute minute count.
+#
+# Blinking comes for free from the module's `interval: 1`: the script is re-run
+# every second and alternates two classes on the wall clock's parity. That same
+# 1 Hz poll is why toggling from a key binding shows up immediately, with no
+# SIGRTMIN signalling to wire up.
+
+# --- settings ---------------------------------------------------------------
+# Edit ~/.config/pomodoro.conf to change these; it is sourced as shell, so a
+# line like `MINUTES=25` is the whole thing. No restart is needed: waybar re-runs
+# this script once a second, so the next tick already uses the new value, and a
+# session in flight keeps its elapsed time and simply gets a new finish line.
+MINUTES=30
+# A short chirp, ~0.5s. Deliberately not an alarm: the blinking tomato is the
+# persistent signal, so this only has to mark the moment. Audition alternatives
+# with `paplay` before swapping -- the gnome theme keeps a large set under
+# /usr/share/sounds/gnome/default/alarms/, mostly far longer than this one.
+CHIME=/usr/share/sounds/gnome/default/alarms/chirping.oga
+
+CONF="${XDG_CONFIG_HOME:-$HOME/.config}/pomodoro.conf"
+# shellcheck source=/dev/null
+[ -r "$CONF" ] && . "$CONF"
+
+# A bad value must not take the tomato down -- this runs once a second in
+# waybar, so a division by zero would be a stuck, silently empty module rather
+# than an error anyone sees. Fall back instead.
+case "$MINUTES" in ''|*[!0-9]*) MINUTES=30 ;; esac
+[ "$MINUTES" -ge 3 ] 2>/dev/null || MINUTES=30    # 3 = one minute per ripening stage
+
+PERIOD=$(( MINUTES * 60 ))
+STAGE=$(( PERIOD / 3 ))         # ripening stage length; 3 stages fill PERIOD
+STATE="${XDG_RUNTIME_DIR:-/tmp}/pomodoro.state"
+
+SEEDLING=🌱                     # U+1F331
+HERB=🌿                         # U+1F33F
+TOMATO=🍅                       # U+1F345
+
+# State is one line: <idle|running|paused> <elapsed> <resumed_at> <chimed>
+#   elapsed     seconds banked before the current run (0 unless resumed)
+#   resumed_at  epoch the current run started; meaningless unless running
+#   chimed      1 once the expiry sound has played, so it fires once per session
+read_state() {
+    phase=idle elapsed=0 resumed=0 chimed=0
+    # Guard the redirect rather than silencing `read`: the shell reports a failed
+    # input redirect itself, so a missing file would otherwise spam waybar's log
+    # once a second until the first pomodoro is started.
+    [ -r "$STATE" ] || return
+    # `read` clobbers the variables even when it fails (an empty file leaves them
+    # blank, not defaulted), so its status is ignored and the checks below are
+    # what actually decide whether the values are usable.
+    read -r phase elapsed resumed chimed < "$STATE"
+
+    # Reject anything that isn't a well-formed line -- absent, truncated by a
+    # crash mid-write, or hand-edited while testing -- rather than letting a
+    # stray value reach the arithmetic below.
+    case "$phase:$elapsed:$resumed:$chimed" in
+        idle:*|running:*|paused:*) ;;
+        *) phase=idle elapsed=0 resumed=0 chimed=0; return ;;
+    esac
+    # Checked one field at a time, not concatenated: a truncated "running 0" line
+    # leaves resumed and chimed empty, and "0"+""+"" would pass an all-digits test
+    # on the joined string while still breaking the arithmetic below.
+    for field in "$elapsed" "$resumed" "$chimed"; do
+        case "$field" in
+            ''|*[!0-9]*) phase=idle elapsed=0 resumed=0 chimed=0; return ;;
+        esac
+    done
+}
+
+write_state() {  # write atomically; the 1 Hz reader must never see a partial line
+    tmp="$STATE.$$"
+    printf '%s %s %s %s\n' "$1" "$2" "$3" "$4" > "$tmp" && mv -f "$tmp" "$STATE"
+}
+
+now() { date +%s; }
+
+# Seconds on the clock right now, counting the in-flight run when one is going.
+effective() {
+    if [ "$phase" = running ]; then
+        echo $(( elapsed + $(now) - resumed ))
+    else
+        echo "$elapsed"
+    fi
+}
+
+mmss() { printf '%d:%02d' $(( $1 / 60 )) $(( $1 % 60 )); }
+
+case "${1:-waybar}" in
+    toggle)
+        read_state
+        case "$phase" in
+            idle)    write_state running 0 "$(now)" 0 ;;
+            running) write_state paused "$(effective)" 0 "$chimed" ;;
+            paused)  write_state running "$elapsed" "$(now)" "$chimed" ;;
+        esac
+        ;;
+
+    reset)   write_state running 0 "$(now)" 0 ;;
+    stop)    write_state idle 0 0 0 ;;
+
+    waybar)
+        read_state
+        secs=$(effective)
+
+        if [ "$phase" = idle ]; then
+            printf '{"text":"%s","tooltip":"Pomodoro - idle","class":["pomo-idle"]}\n' "$SEEDLING"
+            exit 0
+        fi
+
+        if [ "$secs" -ge "$PERIOD" ]; then
+            # Expired. Chime once, then blink at 1 Hz until reset.
+            if [ "$chimed" -eq 0 ]; then
+                paplay "$CHIME" >/dev/null 2>&1 &
+                chimed=1
+                write_state "$phase" "$elapsed" "$resumed" 1
+            fi
+            glyph=$TOMATO
+            tip="Pomodoro - done, $(mmss $(( secs - PERIOD ))) over"
+            if [ $(( $(now) % 2 )) -eq 0 ]; then
+                class='"pomo-done"'
+            else
+                class='"pomo-done-off"'
+            fi
+        else
+            stage=$(( secs / STAGE ))
+            case $stage in
+                0) glyph=$SEEDLING ;;
+                1) glyph=$HERB ;;
+                *) glyph=$TOMATO ; stage=2 ;;
+            esac
+            # Ten steps per stage, measured against the stage rather than the
+            # clock, so the ramp follows MINUTES instead of assuming 30 of them.
+            # At MINUTES=30 this is exactly `secs / 60`, which is what the class
+            # names still say.
+            step=$(( (secs - stage * STAGE) * 10 / STAGE ))
+            class="\"pomo-m$(( stage * 10 + step ))\""
+            tip="Pomodoro - $(mmss "$secs") elapsed, $(mmss $(( PERIOD - secs ))) left"
+        fi
+
+        # class is a JSON array: waybar reads a bare string as one class name,
+        # so "pomo-m7 pomo-paused" would never match either rule in style.css.
+        if [ "$phase" = paused ]; then
+            class="$class,\"pomo-paused\""
+            tip="$tip (paused)"
+        fi
+
+        printf '{"text":"%s","tooltip":"%s","class":[%s]}\n' "$glyph" "$tip" "$class"
+        ;;
+
+    *)
+        echo "usage: pomodoro [waybar|toggle|reset|stop]" >&2
+        exit 1
+        ;;
+esac

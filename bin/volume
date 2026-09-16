@@ -1,0 +1,48 @@
+#!/bin/sh
+# Adjust or query the default PipeWire sink/source, with a dunst OSD.
+# Usage: volume up|down|mute|micmute|show [STEP]
+
+SINK="@DEFAULT_AUDIO_SINK@"
+SOURCE="@DEFAULT_AUDIO_SOURCE@"
+STEP="${2:-5}"
+LIMIT=1.5   # allow boosting above 100%, but not past 150%
+
+case "$1" in
+    up)      wpctl set-mute "$SINK" 0; wpctl set-volume -l "$LIMIT" "$SINK" "${STEP}%+" ;;
+    down)    wpctl set-mute "$SINK" 0; wpctl set-volume -l "$LIMIT" "$SINK" "${STEP}%-" ;;
+    mute)    wpctl set-mute "$SINK" toggle ;;
+    micmute) wpctl set-mute "$SOURCE" toggle ;;
+    show)    ;;
+    *)       echo "usage: volume up|down|mute|micmute|show [step]" >&2; exit 1 ;;
+esac
+
+notify() {
+    notify-send -a volume -u low \
+        -h "string:x-dunst-stack-tag:$1" \
+        -h "int:value:$2" \
+        -i "$3" "$4"
+}
+
+if [ "$1" = micmute ]; then
+    set -- $(wpctl get-volume "$SOURCE")   # e.g. "Volume: 1.00 [MUTED]"
+    pct=$(awk "BEGIN{printf \"%d\", $2 * 100}")
+    if [ "$3" = "[MUTED]" ]; then
+        notify mic 0 microphone-sensitivity-muted "Microphone muted"
+    else
+        notify mic "$pct" microphone-sensitivity-high "Microphone ${pct}%"
+    fi
+else
+    set -- $(wpctl get-volume "$SINK")
+    pct=$(awk "BEGIN{printf \"%d\", $2 * 100}")
+    if [ "$3" = "[MUTED]" ]; then
+        notify volume 0 audio-volume-muted "Volume muted"
+    elif [ "$pct" -eq 0 ]; then
+        notify volume 0 audio-volume-muted "Volume ${pct}%"
+    elif [ "$pct" -lt 34 ]; then
+        notify volume "$pct" audio-volume-low "Volume ${pct}%"
+    elif [ "$pct" -lt 67 ]; then
+        notify volume "$pct" audio-volume-medium "Volume ${pct}%"
+    else
+        notify volume "$pct" audio-volume-high "Volume ${pct}%"
+    fi
+fi
