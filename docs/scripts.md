@@ -1,10 +1,14 @@
 # The scripts
 
-Ten POSIX shell scripts, about 1,300 lines, in [`bin/`](../bin). They are all
-`#!/bin/sh` — no bash, no Python, no runtime. Each one is commented at length
-in the source; this page is the map, not the territory. If a script interests
-you, read it: the comments explain *why*, which is the part that does not fit
-in a table.
+The ten scripts that make up the desktop, about 1,300 lines, in
+[`bin/`](../bin). They are all `#!/bin/sh` — no bash, no Python, no runtime.
+Each one is commented at length in the source; this page is the map, not the
+territory. If a script interests you, read it: the comments explain *why*,
+which is the part that does not fit in a table.
+
+(`bin/` also holds [`blur-shot`](../bin/blur-shot), which is not part of the
+desktop — nothing binds or execs it. It is the tool that made the README's
+screenshots, and the README describes it.)
 
 Two conventions run through all of them:
 

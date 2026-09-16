@@ -1,135 +1,98 @@
-#!/usr/bin/env python3
-"""Screenshot a sway session with window contents blurred.
+#!/bin/sh
+# Screenshot a sway session with window contents blurred.
+#
+# For publishing a picture of your desktop without publishing what is on it.
+# grim has no filters -- it captures and nothing else -- so the blur is a
+# second pass, here in ImageMagick.
+#
+# Window rectangles come from sway's own IPC rather than being guessed, so
+# nothing on screen is missed, and the bar is left alone: the bar is usually
+# the point of the picture and holds icons and numbers rather than anything
+# you would mind strangers reading.
+#
+#   blur-shot                  capture, blur windows, keep the bar sharp
+#   blur-shot -o shot.png      write somewhere specific
+#   blur-shot --titles         also blur sway's title bars (read on)
+#   blur-shot --bar            crop to the bar; no blur, nothing to blur
+#   blur-shot --radius 24      blur harder (default 16)
+#   blur-shot --zoom 3         enlarge, for a bar crop in a README
+#
+# --titles matters more than it sounds. Sway draws the title bar *above* the
+# window rectangle, so it survives the default blur -- and named-term puts the
+# working directory in the title, so a terminal opened in ~/work/acme-merger
+# will publish that. Check what your titles say, or pass --titles.
+#
+# Needs grim, jq and ImageMagick. Nothing binds this script; it is not part of
+# the desktop. It lives here because it made the screenshots in the README.
 
-For publishing a screenshot of your desktop without publishing what is on it.
-grim has no filters -- it captures and nothing else -- so the blur is a second
-pass, here in Pillow.
+set -eu
 
-The window rectangles come from sway's own IPC rather than being guessed, so
-nothing on screen is missed and the bar is left alone: the bar is usually the
-point of the picture, and it holds icons and numbers rather than anything you
-would mind strangers reading.
+RADIUS=16
+ZOOM=1
+TITLES=false
+BAR_ONLY=no
+OUT=screenshot.png
 
-    blur-shot                     capture, blur windows, keep the bar sharp
-    blur-shot -o shot.png         write somewhere specific
-    blur-shot --titles            also blur sway's title bars (see below)
-    blur-shot --bar               crop to the bar; no blur, nothing to blur
-    blur-shot --radius 24         blur harder
+usage() { sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; }
 
---titles matters more than it sounds. Sway draws the title bar *above* the
-window rectangle, so it survives the default blur -- and named-term puts the
-working directory in the title, so a terminal opened in ~/work/acme-merger
-will publish that. Check what your titles say, or pass --titles.
+while [ $# -gt 0 ]; do
+    case $1 in
+        -o|--output) OUT=${2:?-o needs a path}; shift 2 ;;
+        --radius)    RADIUS=${2:?--radius needs a number}; shift 2 ;;
+        --zoom)      ZOOM=${2:?--zoom needs a number}; shift 2 ;;
+        --titles)    TITLES=true; shift ;;
+        --bar)       BAR_ONLY=yes; shift ;;
+        -h|--help)   usage; exit 0 ;;
+        *) echo "blur-shot: unknown option '$1' (try --help)" >&2; exit 2 ;;
+    esac
+done
 
-The only dependency beyond grim and sway is Pillow: apt install python3-pil.
+for c in grim jq magick; do
+    command -v "$c" >/dev/null 2>&1 || {
+        echo "blur-shot: needs $c" >&2; exit 1; }
+done
 
-This is the odd one out in bin/ -- everything else here is POSIX sh, and this
-is Python, because blurring an image in sh is not a thing anyone should do.
-It is also not part of the desktop: nothing binds it, nothing execs it. It
-lives here because it is what produced the screenshot in the README.
-"""
-import argparse
-import json
-import os
-import subprocess
-import sys
-import tempfile
+RAW=$(mktemp --suffix=.png -t blur-shot-XXXXXX)
+trap 'rm -f "$RAW"' EXIT INT TERM
+grim "$RAW"
 
-try:
-    from PIL import Image, ImageFilter
-except ImportError:
-    sys.exit("blur-shot: needs Pillow -- sudo apt install python3-pil")
+# The focused workspace's rect starts below the bar, so its y *is* the bar
+# height. Better than sampling pixels: it does not care what colour the bar
+# is, and it is right even when nothing is open.
+BAR=$(swaymsg -t get_workspaces --raw | jq -r 'map(select(.focused))[0].rect.y')
 
-BAR_BG = (50, 50, 50)   # waybar's #323232, per config/waybar/style.css
+set --
+if [ "$BAR_ONLY" = yes ]; then
+    [ "$BAR" -gt 0 ] 2>/dev/null || { echo "blur-shot: no bar at the top" >&2; exit 1; }
+    WIDTH=$(magick identify -format '%w' "$RAW")
+    set -- -crop "${WIDTH}x${BAR}+0+0" +repage
+else
+    # A view has a pid; containers and workspaces do not. That is the whole
+    # test, and unlike matching on app_id it catches xwayland windows too.
+    REGIONS=$(swaymsg -t get_tree --raw | jq -r --argjson titles "$TITLES" '
+        .. | objects | select(.pid != null and .visible == true)
+        | "\(.rect.width)x\(.rect.height)+\(.rect.x)+\(.rect.y)",
+          # deco_rect is relative to the parent container and so cannot be
+          # used as-is, but a title bar always sits on top of its window.
+          (if $titles and ((.deco_rect.height // 0) > 0)
+           then "\(.rect.width)x\(.deco_rect.height)+\(.rect.x)+\(.rect.y - .deco_rect.height)"
+           else empty end)')
 
+    # A bug in the query above must never mean an unblurred screenshot, so
+    # fall back to blurring everything below the bar.
+    if [ -z "$REGIONS" ]; then
+        echo "blur-shot: no visible windows from sway -- blurring all below the bar" >&2
+        HEIGHT=$(magick identify -format '%h' "$RAW")
+        REGIONS="$(magick identify -format '%w' "$RAW")x$((HEIGHT - BAR))+0+$BAR"
+    fi
 
-def sway_tree():
-    out = subprocess.run(["swaymsg", "-t", "get_tree", "--raw"],
-                         capture_output=True, text=True, check=True).stdout
-    return json.loads(out)
+    for r in $REGIONS; do
+        set -- "$@" -region "$r" -blur "0x$RADIUS" +region
+        echo "blurred $r"
+    done
+fi
 
+[ "$ZOOM" -gt 1 ] 2>/dev/null && set -- "$@" -scale "$((ZOOM * 100))%"
 
-def visible_windows(node, blur_titles):
-    """Rectangles of the windows sway says are on screen -- i.e. what grim got."""
-    if (node.get("app_id") or node.get("window_props")) and node.get("visible"):
-        r = node["rect"]
-        yield r["x"], r["y"], r["width"], r["height"]
-        # deco_rect is relative to the parent container and so cannot be used
-        # directly, but a title bar always sits immediately above its window.
-        deco = node.get("deco_rect") or {}
-        if blur_titles and deco.get("height"):
-            yield r["x"], r["y"] - deco["height"], r["width"], deco["height"]
-    for key in ("nodes", "floating_nodes"):
-        for child in node.get(key, []):
-            yield from visible_windows(child, blur_titles)
-
-
-def bar_height(im, limit=200):
-    """Rows of bar background at the top. Beats hardcoding a height that
-    changes with font size."""
-    h = 0
-    for y in range(min(limit, im.height)):
-        row = [im.getpixel((x, y)) for x in range(0, im.width, 7)]
-        if sum(p == BAR_BG for p in row) * 100 // len(row) < 60:
-            break
-        h = y + 1
-    return h
-
-
-def main():
-    ap = argparse.ArgumentParser(add_help=False)
-    ap.add_argument("-o", "--output", default="screenshot.png")
-    ap.add_argument("--titles", action="store_true")
-    ap.add_argument("--bar", action="store_true")
-    ap.add_argument("--radius", type=int, default=16)
-    ap.add_argument("--zoom", type=int, default=1)
-    ap.add_argument("-h", "--help", action="store_true")
-    args = ap.parse_args()
-
-    if args.help:
-        print(__doc__.strip())
-        return 0
-
-    fd, raw = tempfile.mkstemp(suffix=".png", prefix="blur-shot-")
-    os.close(fd)
-    try:
-        subprocess.run(["grim", raw], check=True)
-        im = Image.open(raw).convert("RGB")
-
-        if args.bar:
-            h = bar_height(im)
-            if not h:
-                return "blur-shot: no bar found at the top of the screen"
-            im = im.crop((0, 0, im.width, h))
-            print(f"cropped to the bar: {im.width}x{h}")
-        else:
-            rects = list(visible_windows(sway_tree(), args.titles))
-            # A bug in the tree walk must never mean an unblurred screenshot,
-            # so fall back to blurring everything below the bar.
-            if not rects:
-                h = bar_height(im) or 0
-                print("! no visible windows from IPC -- blurring all below the bar",
-                      file=sys.stderr)
-                rects = [(0, h, im.width, im.height - h)]
-
-            for x, y, w, h in rects:
-                x, y = max(0, x), max(0, y)
-                w, h = min(w, im.width - x), min(h, im.height - y)
-                if w > 0 and h > 0:
-                    patch = im.crop((x, y, x + w, y + h))
-                    im.paste(patch.filter(ImageFilter.GaussianBlur(args.radius)), (x, y))
-                    print(f"blurred {w}x{h} at {x},{y}")
-
-        if args.zoom > 1:
-            im = im.resize((im.width * args.zoom, im.height * args.zoom),
-                           Image.NEAREST)
-
-        im.save(args.output, optimize=True)
-        print(f"wrote {args.output}  ({im.width}x{im.height})")
-    finally:
-        os.unlink(raw)
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+magick "$RAW" "$@" "$OUT"
+echo "wrote $OUT  ($(magick identify -format '%wx%h' "$OUT"))"

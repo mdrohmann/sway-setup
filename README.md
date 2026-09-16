@@ -40,7 +40,7 @@ so you read it out of the corner of your eye instead of parsing a countdown.
 One extra, not part of the desktop — nothing binds it:
 [`blur-shot`](bin/blur-shot) captures the screen with window contents blurred,
 for publishing a screenshot without publishing what is on it. `grim` has no
-filters, so the blur is a Pillow pass, and the rectangles come from sway's IPC
+filters, so the blur is an ImageMagick pass, and the rectangles come from IPC
 rather than being guessed. It made the image above (`blur-shot --bar`).
 
 Be careful with `--titles`: sway draws title bars *above* the window rectangle,

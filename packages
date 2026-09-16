@@ -67,7 +67,7 @@ opt   tmux                    tmux            # 3.6a, claude-sessions follows pa
 opt   htop                    htop            # 3.4.1, waybar cpu/memory on-click
 opt   alsa-utils              alsamixer       # 1.2.15.2, $mod+Shift+m
 opt   zsh                     zsh             # 5.9, foot.ini pins /usr/bin/zsh
-opt   python3-pil             python3         # 12.1.1, blur-shot only
+opt   imagemagick             magick          # 8:7.1.2.18, blur-shot only
 
 # --- fonts ----------------------------------------------------------------
 # waybar's glyphs are FontAwesome 4.x codepoints and the pomodoro is colour

@@ -122,12 +122,6 @@ else
             *)    command -v "$check" >/dev/null 2>&1 && continue ;;
         esac
 
-        # python3-pil is a module, not a command -- python3 existing proves
-        # nothing about Pillow being importable.
-        if [ "$pkg" = python3-pil ]; then
-            python3 -c 'import PIL' >/dev/null 2>&1 && continue
-        fi
-
         case $kind in
             req)  missing_req="$missing_req $check"; apt_req="$apt_req $pkg" ;;
             *)    missing_opt="$missing_opt $check"; apt_opt="$apt_opt $pkg" ;;
