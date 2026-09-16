@@ -81,6 +81,17 @@ while you were reading something else. Match a prefix of the `app_id`
 is *mapped*, so anything that must survive a manual move has to be re-asserted
 by hand, which is what [`webapp`](bin/webapp) does on every keypress.
 
+![The mail workspace: Gmail filling the screen as a Chrome app window, with no
+tab strip or address bar, tabbed with Calendar](docs/screenshots/mail-workspace.png)
+
+`$mod+m`, contents blurred with `blur-shot --titles`. Two things to look at.
+There is **no tab strip and no address bar** — a Chrome `--app` window has no
+browser chrome, so sway tiles it like any native application. And the strip
+under the bar is a *tabbed container*, Gmail and Calendar sharing the `mail`
+workspace, which is why `mail` appears in the bar here but not in the picture
+above: the CSS hides those buttons unless the workspace is active or urgent.
+(The pomodoro has also gone 🌿 → 🍅 between the two shots.)
+
 **`move to workspace mail, layout tabbed` — the order is load-bearing.**
 Reversed, `layout tabbed` applies to whichever workspace the window happened to
 map on, silently converting the one you were working in.
