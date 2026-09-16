@@ -496,3 +496,9 @@ for_window [window_type="splash"] floating enable
 #   for_window [class="Google-chrome" title="^Picture-in-picture$"] floating enable, sticky enable
 
 include /etc/sway/config.d/*
+
+# Machine-local overrides: outputs, scale, keyboard layout -- anything that is
+# about this particular machine rather than about the setup. Files here are
+# gitignored, so a second machine can differ without ever touching this file.
+# The glob is tolerated when the directory is empty.
+include ~/.config/sway/config.d/*.conf

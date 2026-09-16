@@ -112,13 +112,41 @@ are the lines that are about *my* hardware and accounts rather than about sway:
 | `CHIME=` | `bin/pomodoro` | Wants the GNOME sound theme installed. |
 | Workspace names `slack` and `mail` | `config/sway/config`, `config/waybar/style.css` | These must match each other, or the bar's hide/show rules silently do nothing. |
 
-## What is not here
+## Before you lock anything
 
-**`/etc/pam.d/hyprlock`.** Hyprlock's `auth { pam { module = hyprlock } }` needs
-a PAM stack file, which is root-owned and outside `$HOME`, so no git repo can
-install it for you. Without it you will not be able to unlock. The fingerprint
-block additionally wants `fprintd` and an enrolled print, and is entirely
-optional — delete it if your machine has no sensor.
+Hyprlock's `auth { pam { module = hyprlock } }` needs a PAM stack file. It is
+root-owned and lives outside `$HOME`, so **no git repo can install it for you**,
+and `install.sh` will not try. Without it hyprlock starts, accepts your
+password, and rejects it — every time. That is a session you cannot unlock,
+with a TTY as your only way back in.
+
+A reference copy is at [`etc/pam.d/hyprlock`](etc/pam.d/hyprlock):
+
+```sh
+sudo cp etc/pam.d/hyprlock /etc/pam.d/hyprlock
+```
+
+```
+# hyprlock talks to fprintd directly over D-Bus, so pam_fprintd must NOT be in
+# this stack: it would block password entry for its whole timeout, serialising
+# two things hyprlock deliberately runs in parallel. Password path only here.
+auth     required   pam_unix.so     try_first_pass nullok
+account  include    common-account
+session  include    common-session
+```
+
+The fingerprint block in `hyprlock.conf` additionally wants `fprintd` and an
+enrolled print (`fprintd-enroll`). It is optional — delete it if your machine
+has no sensor.
+
+## Machine-local overrides
+
+`config/sway/config` ends with `include ~/.config/sway/config.d/*.conf`, and
+that directory is gitignored. Outputs, scale, keyboard layout — anything about
+*your* machine rather than about the setup — goes in a file there, and a second
+machine can differ without either of them ever touching the tracked config.
+
+## What is not here
 
 **Any rofi or dunst config.** Both run on pure distro defaults. That is
 deliberate, not an oversight — if you came looking for where the notification
@@ -128,6 +156,25 @@ styling lives, there isn't any.
 particular is excluded because htop rewrites the file itself whenever you
 change a setting, which makes a symlinked copy a permanent source of dirty
 `git status`.
+
+## Known limitations
+
+- **`slack` must be called by path**, as sway and waybar both do. It finds its
+  real implementation with `exec "${0%/*}/webapp"`, and POSIX leaves `${0%/*}`
+  *unchanged* when there is no slash — so invoking a bare `slack` from `PATH`
+  would try to run `slack/webapp` and fail confusingly.
+- **`claude-sessions` reads Claude Code's internal layout** under
+  `~/.claude/sessions` and `~/.claude/projects`. That is undocumented and
+  version-coupled; expect it to need a fix after an update, and to show nothing
+  at all on a machine without Claude Code.
+- **`foot.ini` pins `shell=/usr/bin/zsh`.** Without zsh installed, foot exits
+  the moment it opens — which in a fresh session means no terminal and no way
+  to fix the config that is causing it. `install.sh` warns about this loudly.
+- **The pomodoro chime fails silently.** `paplay` output is discarded, so a
+  missing `CHIME` file means no sound and no error. Install `gnome-audio`, or
+  point it somewhere else.
+- **Battery is laptop-only and the temperature sensor is Intel-only.** See the
+  table above.
 
 ## License
 

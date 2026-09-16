@@ -1,0 +1,6 @@
+# hyprlock talks to fprintd directly over D-Bus, so pam_fprintd must NOT be in
+# this stack: it would block password entry for its whole timeout, serialising
+# two things hyprlock deliberately runs in parallel. Password path only here.
+auth     required   pam_unix.so     try_first_pass nullok
+account  include    common-account
+session  include    common-session

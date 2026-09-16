@@ -4,3 +4,8 @@
 
 # Left behind by install.sh when it moves an existing config out of the way.
 *.pre-sway-setup-*
+
+# Machine-local sway overrides (outputs, scale, keyboard layout). The directory
+# is tracked so the include has somewhere to look; its contents are not.
+config/sway/config.d/*
+!config/sway/config.d/.gitkeep

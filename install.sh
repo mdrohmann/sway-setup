@@ -135,5 +135,38 @@ can install for you.
 EOF
 fi
 
+# ------------------------------------------------------- things that bite
+#
+# Two failure modes here are not "a module looks wrong", they are "you cannot
+# get back into your session". Both are checked read-only; neither is fixed
+# for you, because both need root or a decision.
+
+if [ ! -f /etc/pam.d/hyprlock ]; then
+    cat <<EOF
+
+  !!  /etc/pam.d/hyprlock is missing.
+
+      hyprlock will start, accept your password, and reject it -- every time.
+      That is a locked session you cannot unlock, with a TTY as your only way
+      back. Install it BEFORE you lock anything:
+
+        sudo cp $REPO/etc/pam.d/hyprlock /etc/pam.d/hyprlock
+EOF
+fi
+
+# foot.ini pins shell=/usr/bin/zsh. On a machine without zsh, foot exits the
+# instant it opens -- which in a fresh session means no terminal at all, and
+# no way to edit the config that is causing it.
+if ! [ -x /usr/bin/zsh ]; then
+    cat <<EOF
+
+  !!  /usr/bin/zsh does not exist, and config/foot/foot.ini pins it.
+
+      foot will exit immediately on launch, leaving you with no terminal.
+      Either 'sudo apt install zsh', or delete the 'shell=' line in
+      $REPO/config/foot/foot.ini before you reload.
+EOF
+fi
+
 echo
 echo "Log out and back in, or press \$mod+Shift+c to reload sway."
