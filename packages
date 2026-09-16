@@ -1,0 +1,84 @@
+# Ubuntu packages this setup needs, and the thing each one provides.
+#
+#   <kind>  <apt package>  <what to check for>
+#
+# kind:  req   the desktop does not work without it
+#        opt   something degrades, but the rest is fine
+#        font  checked with fc-list, not command -v
+#
+# install.sh reads this file to report what is missing and to build the apt
+# line it prints. It never installs anything.
+#
+# Versions in the comments are what this was built and running against on
+# Ubuntu 26.04, for when something changes behaviour and you need to know
+# what it changed from.
+#
+# Worth knowing: quite a few of these arrive as dependencies of sway or of
+# the desktop task rather than as things you install by name -- foot, wmenu,
+# dunst, libnotify-bin, slurp, wireplumber and every font except JetBrains
+# Mono came in that way here. They are listed explicitly anyway, because
+# relying on another package's dependency list to keep shipping you a
+# terminal is how you end up with no terminal.
+
+# --- the compositor and the bar ------------------------------------------
+req   sway                    swaymsg         # 1.11-3
+req   swayidle                swayidle        # 1.9.0-1
+req   waybar                  waybar          # 0.15.0-1
+req   foot                    foot            # 1.25.0-1, arrives via sway
+req   wmenu                   wmenu-run       # 0.2.0-1, arrives via sway
+req   rofi                    rofi            # 2.0.0-0.2
+req   jq                      jq              # 1.8.1-4ubuntu2, every script uses it
+
+# --- notifications --------------------------------------------------------
+req   dunst                   dunstctl        # 1.12.2-1build1
+req   libnotify-bin           notify-send     # 0.8.8-1, separate from dunst
+
+# --- clipboard, screenshots ----------------------------------------------
+req   wl-clipboard            wl-copy         # 2.2.1-2build1
+req   cliphist                cliphist        # 0.5.0-1build1
+req   grimshot                grimshot        # 1.10.1-1build1 -- NOT sway-contrib,
+                                              # which does not exist on Ubuntu
+req   grim                    grim            # 1.4.0+ds-2build3
+req   slurp                   slurp           # 1.6.0-1, for grimshot's area mode
+
+# --- hardware keys --------------------------------------------------------
+req   brightnessctl           brightnessctl   # 0.5.1-3.1build1
+req   wireplumber             wpctl           # 0.5.13-1ubuntu1
+req   pulseaudio-utils        paplay          # 1:17.0, the pomodoro chime
+req   util-linux              setsid          # webapp launches Chrome detached
+
+# --- locking --------------------------------------------------------------
+# hyprlock also needs /etc/pam.d/hyprlock, which no package and no git repo
+# will give you. See "Before you lock anything" in the README.
+opt   hyprlock                hyprlock        # 0.9.2-1build4
+opt   swaylock                swaylock        # 1.8.4-1, kept as a fallback
+
+# --- tray and session -----------------------------------------------------
+opt   network-manager-gnome   nm-applet       # 1.36.0-4ubuntu1
+opt   blueman                 blueman-applet  # 2.4.4-1build1
+opt   poweralertd             poweralertd     # 0.3.0-1build1
+opt   policykit-1-gnome       pkexec          # 0.105-8build1
+# The indicator binary ships inside gammastep. There is no
+# gammastep-indicator package, whatever the binary name suggests.
+opt   gammastep               gammastep-indicator   # 2.0.9-2
+
+# --- things the scripts shell out to -------------------------------------
+opt   tmux                    tmux            # 3.6a, claude-sessions follows panes
+opt   htop                    htop            # 3.4.1, waybar cpu/memory on-click
+opt   alsa-utils              alsamixer       # 1.2.15.2, $mod+Shift+m
+opt   zsh                     zsh             # 5.9, foot.ini pins /usr/bin/zsh
+opt   python3-pil             python3         # 12.1.1, blur-shot only
+
+# --- fonts ----------------------------------------------------------------
+# waybar's glyphs are FontAwesome 4.x codepoints and the pomodoro is colour
+# emoji; without these you get tofu boxes where the bar should be.
+font  fonts-dejavu-core       DejaVu Sans Mono
+font  fonts-font-awesome      FontAwesome
+font  fonts-noto-color-emoji  Noto Color Emoji
+font  fonts-jetbrains-mono    JetBrains Mono
+
+# --- not in the Ubuntu archive -------------------------------------------
+# google-chrome-stable: the webapp scripts launch `google-chrome --app=`.
+# Get the .deb from google.com/chrome and `sudo apt install ./the-file.deb`.
+# Chromium will not do: the app_id it derives has a different shape, so the
+# for_window rules in config/sway/config will not match.

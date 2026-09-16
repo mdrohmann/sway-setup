@@ -127,6 +127,30 @@ the `apt` line, but does not install anything — running someone else's
 `sudo apt install` off a blog link is a bad habit and I would rather not teach
 it.
 
+## Packages
+
+[`packages`](packages) is the full list, with what each one provides and the
+version this was built against. `install.sh` reads it, tells you what is
+missing, and prints an `apt install` line containing only that — it does not
+install anything itself.
+
+Two of these are worth knowing about before you go looking:
+
+- **`grimshot` is its own package.** There is no `sway-contrib` on Ubuntu,
+  whatever the upstream repo layout suggests.
+- **There is no `gammastep-indicator` package.** That binary ships inside
+  `gammastep`, despite having its own name.
+
+A fair number of these — `foot`, `wmenu`, `dunst`, `libnotify-bin`, `slurp`,
+`wireplumber` and every font except JetBrains Mono — arrive as dependencies of
+sway rather than as things you install by name. They are listed explicitly
+anyway. Relying on another package's dependency list to keep shipping you a
+terminal is how you end up with no terminal.
+
+Chrome is the one thing apt will not give you. Get the `.deb` from
+google.com/chrome; Chromium will not substitute, because the `app_id` it
+derives has a different shape and the `for_window` rules will not match.
+
 ## Things you will want to change
 
 Nothing here is templated; it is a personal config, not a distribution. These

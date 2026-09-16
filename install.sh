@@ -102,18 +102,38 @@ echo "  $linked linked, $already already correct, $moved moved aside"
 # runs `sudo apt install` is one nobody should run; printing the command costs
 # you one paste and costs me your trust only if I am wrong about the list.
 
-REQUIRED="sway swaymsg swayidle swaynag waybar foot rofi wmenu jq dunst \
-notify-send dunstctl wl-copy wl-paste cliphist grimshot brightnessctl wpctl \
-paplay setsid"
-OPTIONAL="hyprlock gammastep google-chrome tmux nm-applet blueman-applet \
-poweralertd htop alsamixer"
+PACKAGES="$REPO/packages"
 
-missing_req= missing_opt=
-for c in $REQUIRED; do command -v "$c" >/dev/null 2>&1 || missing_req="$missing_req $c"; done
-for c in $OPTIONAL; do command -v "$c" >/dev/null 2>&1 || missing_opt="$missing_opt $c"; done
+missing_req= missing_opt= apt_req= apt_opt=
 
-# blur-shot is the one Python thing here, and a module is not a command.
-python3 -c 'import PIL' >/dev/null 2>&1 || missing_opt="$missing_opt python3-pil(blur-shot)"
+if [ ! -f "$PACKAGES" ]; then
+    echo "  !! no packages file next to $0 -- skipping the dependency check" >&2
+else
+    # Three columns: kind, apt package, and what to look for. The check value
+    # is last so a font name may contain spaces.
+    while read -r kind pkg check; do
+        case $kind in ''|\#*) continue ;; esac
+        [ -n "${check:-}" ] || continue
+        check=${check%%#*}                        # strip trailing comment
+        check=$(printf '%s' "$check" | sed 's/[[:space:]]*$//')
+
+        case $kind in
+            font) fc-list 2>/dev/null | grep -qi -- "$check" && continue ;;
+            *)    command -v "$check" >/dev/null 2>&1 && continue ;;
+        esac
+
+        # python3-pil is a module, not a command -- python3 existing proves
+        # nothing about Pillow being importable.
+        if [ "$pkg" = python3-pil ]; then
+            python3 -c 'import PIL' >/dev/null 2>&1 && continue
+        fi
+
+        case $kind in
+            req)  missing_req="$missing_req $check"; apt_req="$apt_req $pkg" ;;
+            *)    missing_opt="$missing_opt $check"; apt_opt="$apt_opt $pkg" ;;
+        esac
+    done < "$PACKAGES"
+fi
 
 echo
 if [ -z "$missing_req" ] && [ -z "$missing_opt" ]; then
@@ -121,21 +141,17 @@ if [ -z "$missing_req" ] && [ -z "$missing_opt" ]; then
 else
     [ -n "$missing_req" ] && echo "Missing (required):$missing_req"
     [ -n "$missing_opt" ] && echo "Missing (optional):$missing_opt"
+    # Deduplicate: one package can provide several of the things above.
+    apt_all=$(printf '%s %s' "$apt_req" "$apt_opt" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ' | sed 's/ *$//')
+    echo
+    echo "On Ubuntu that is:"
+    echo
+    echo "  sudo apt install $apt_all"
     cat <<'EOF'
 
-On Ubuntu/Debian most of that is:
-
-  sudo apt install sway swayidle swaylock waybar foot rofi wmenu jq dunst \
-      wl-clipboard cliphist sway-contrib brightnessctl wireplumber \
-      pipewire-audio hyprlock gammastep gammastep-indicator tmux \
-      network-manager-gnome blueman poweralertd policykit-1-gnome htop \
-      alsa-utils python3-pil fonts-dejavu-core fonts-font-awesome \
-      fonts-noto-color-emoji \
-      fonts-jetbrains-mono
-
-Google Chrome is not in the archive; the web-app scripts need it. And see
-"What is not here" in the README for /etc/pam.d/hyprlock, which no git repo
-can install for you.
+Google Chrome is not in the archive and the web-app scripts need it -- get the
+.deb from google.com/chrome. See also "Before you lock anything" in the README
+for /etc/pam.d/hyprlock, which no package and no git repo can install for you.
 EOF
 fi
 
