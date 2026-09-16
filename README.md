@@ -13,6 +13,15 @@ It runs on Ubuntu 26.04 on a ThinkPad T14. Most of it is portable; the handful
 of things that are not are listed under [Things you will want to
 change](#things-you-will-want-to-change).
 
+![The waybar strip: workspace buttons, then the pomodoro, Claude sessions,
+Slack, Gmail, CPU, memory, temperature, bluetooth, battery and
+clock](docs/screenshots/waybar.png)
+
+The bar, with the empty middle elided (the three dots). The sprout is the
+pomodoro partway through a session — it ripens 🌱 → 🌿 → 🍅 as the time goes,
+so you read it out of the corner of your eye instead of parsing a countdown.
+`●4` is four Claude Code sessions, none of them waiting on me.
+
 ## The parts
 
 | | Key | What it does |
@@ -27,6 +36,16 @@ change](#things-you-will-want-to-change).
 | [`window-identity`](bin/window-identity) | `$mod+Shift+i` | Shows the focused window's `app_id` and `class`, for writing `for_window` rules. |
 
 [**docs/scripts.md**](docs/scripts.md) covers each one properly.
+
+One extra, not part of the desktop — nothing binds it:
+[`blur-shot`](bin/blur-shot) captures the screen with window contents blurred,
+for publishing a screenshot without publishing what is on it. `grim` has no
+filters, so the blur is a Pillow pass, and the rectangles come from sway's IPC
+rather than being guessed. It made the image above (`blur-shot --bar`).
+
+Be careful with `--titles`: sway draws title bars *above* the window rectangle,
+so they survive the default blur — and `named-term` puts the working directory
+in the title, so a terminal opened in `~/work/acme-merger` will publish that.
 
 ## The bits worth stealing
 

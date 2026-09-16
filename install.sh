@@ -112,6 +112,9 @@ missing_req= missing_opt=
 for c in $REQUIRED; do command -v "$c" >/dev/null 2>&1 || missing_req="$missing_req $c"; done
 for c in $OPTIONAL; do command -v "$c" >/dev/null 2>&1 || missing_opt="$missing_opt $c"; done
 
+# blur-shot is the one Python thing here, and a module is not a command.
+python3 -c 'import PIL' >/dev/null 2>&1 || missing_opt="$missing_opt python3-pil(blur-shot)"
+
 echo
 if [ -z "$missing_req" ] && [ -z "$missing_opt" ]; then
     echo "All dependencies present."
@@ -126,7 +129,8 @@ On Ubuntu/Debian most of that is:
       wl-clipboard cliphist sway-contrib brightnessctl wireplumber \
       pipewire-audio hyprlock gammastep gammastep-indicator tmux \
       network-manager-gnome blueman poweralertd policykit-1-gnome htop \
-      alsa-utils fonts-dejavu-core fonts-font-awesome fonts-noto-color-emoji \
+      alsa-utils python3-pil fonts-dejavu-core fonts-font-awesome \
+      fonts-noto-color-emoji \
       fonts-jetbrains-mono
 
 Google Chrome is not in the archive; the web-app scripts need it. And see

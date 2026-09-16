@@ -29,3 +29,7 @@ bin/volume              .local/bin/volume
 bin/brightness          .local/bin/brightness
 bin/clip-sync           .local/bin/clip-sync
 bin/window-identity     .local/bin/window-identity
+
+# Not part of the desktop -- nothing binds or execs it. It is the tool that
+# made the screenshot in the README, and it is handy on any sway machine.
+bin/blur-shot           .local/bin/blur-shot
