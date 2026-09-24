@@ -230,6 +230,78 @@ window#waybar {
 #custom-pomodoro.pomo-done     { opacity: 1.000; }
 #custom-pomodoro.pomo-done-off { opacity: 0.100; }
 
+/* Break. A coffee cup that DRAINS: full opacity when the break starts, fading
+ * as it is spent -- the opposite direction from the ripening tomato, because
+ * the break is a resource being used up rather than something growing.
+ *
+ * These ten do NOT need the cross-glyph calibration the m0..m29 ramp above
+ * does, and the note there does not apply. That ramp is awkward only because
+ * three glyphs of different brightness share one scale; the break has a single
+ * glyph, so the only requirement is that the steps look evenly spaced. They are
+ * derived by bisecting opacity until the cup's measured contrast against this
+ * bar's #323232 falls in equal increments, 6.48 down to 2.52. Linear opacity
+ * would spend most of the break looking unchanged and then drop off a cliff.
+ *
+ * The floor stops at 0.450, well above the idle glyph's 0.100, because the fade
+ * is no longer what tells you how much break is left -- the line below does
+ * that, and it does it better at this size. An earlier version drained to 0.150
+ * and went nearly invisible just as the break ended, which is exactly when the
+ * widget should still be readable. The fade now says only "this is a break,
+ * and it is winding down"; the line says how far. */
+#custom-pomodoro.pomo-brk0 { opacity: 1.000; }
+#custom-pomodoro.pomo-brk1 { opacity: 0.953; }
+#custom-pomodoro.pomo-brk2 { opacity: 0.906; }
+#custom-pomodoro.pomo-brk3 { opacity: 0.855; }
+#custom-pomodoro.pomo-brk4 { opacity: 0.796; }
+#custom-pomodoro.pomo-brk5 { opacity: 0.737; }
+#custom-pomodoro.pomo-brk6 { opacity: 0.678; }
+#custom-pomodoro.pomo-brk7 { opacity: 0.608; }
+#custom-pomodoro.pomo-brk8 { opacity: 0.537; }
+#custom-pomodoro.pomo-brk9 { opacity: 0.450; }
+
+/* Marks every break state -- the ten drain steps and the expiry blink alike --
+ * the way .pomo-paused rides on top of the state class, so the break needs no
+ * duplicate rule per step. The blue is the focused-workspace border already in
+ * this file, deliberately not the amber: amber means "wants attention" on the
+ * battery, cpu and paused states, and a break is the opposite of that.
+ *
+ * The line also SHORTENS as the break is spent, so it reads as time remaining
+ * and not merely as "a break is on". It is not a border: a border spans the
+ * whole element and its width is thickness, not length. This is a gradient
+ * with a hard stop, painted into a 2px strip along the bottom edge, so the
+ * stop position is the length of the line. .pomo-brk0..9 below set only that
+ * position; everything else about the strip is settled once, here. */
+#custom-pomodoro.pomo-break {
+    background-repeat: no-repeat;
+    background-position: left bottom;
+    background-size: 100% 2px;
+}
+
+/* Remaining time, in tenths. Paired with the drain steps of the same number:
+ * brk0 is a full line and a full cup, brk9 a stub and a faint one. Both fade
+ * together, because `opacity` applies to the whole widget and there is no
+ * child element to exempt -- the line is dimmest exactly when it is shortest.
+ * That doubling is deliberate rather than redundant: at the small size this
+ * module actually occupies, length is easier to judge than opacity. */
+#custom-pomodoro.pomo-brk0.pomo-break { background-image: linear-gradient(to right, #4c7899 100%, transparent 100%); }
+#custom-pomodoro.pomo-brk1.pomo-break { background-image: linear-gradient(to right, #4c7899  90%, transparent  90%); }
+#custom-pomodoro.pomo-brk2.pomo-break { background-image: linear-gradient(to right, #4c7899  80%, transparent  80%); }
+#custom-pomodoro.pomo-brk3.pomo-break { background-image: linear-gradient(to right, #4c7899  70%, transparent  70%); }
+#custom-pomodoro.pomo-brk4.pomo-break { background-image: linear-gradient(to right, #4c7899  60%, transparent  60%); }
+#custom-pomodoro.pomo-brk5.pomo-break { background-image: linear-gradient(to right, #4c7899  50%, transparent  50%); }
+#custom-pomodoro.pomo-brk6.pomo-break { background-image: linear-gradient(to right, #4c7899  40%, transparent  40%); }
+#custom-pomodoro.pomo-brk7.pomo-break { background-image: linear-gradient(to right, #4c7899  30%, transparent  30%); }
+#custom-pomodoro.pomo-brk8.pomo-break { background-image: linear-gradient(to right, #4c7899  20%, transparent  20%); }
+#custom-pomodoro.pomo-brk9.pomo-break { background-image: linear-gradient(to right, #4c7899  10%, transparent  10%); }
+
+/* Break over. No length left to show, so the line goes full width again and
+ * blinks with the cup -- the widget stops being a gauge and starts being a
+ * notification. */
+#custom-pomodoro.pomo-done.pomo-break,
+#custom-pomodoro.pomo-done-off.pomo-break {
+    background-image: linear-gradient(to right, #4c7899 100%, transparent 100%);
+}
+
 /* Paused. Rides on top of whichever minute/done class is already set, so it
  * only marks the pause: half the current opacity, plus the amber already used
  * for the battery and cpu warning states. Emoji ignore `color`, so the amber

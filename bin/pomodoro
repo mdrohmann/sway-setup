@@ -1,7 +1,7 @@
 #!/bin/sh
 # Pomodoro timer for the waybar `custom/pomodoro` module.
 #
-# Usage: pomodoro [waybar|toggle|reset|stop]
+# Usage: pomodoro [waybar|toggle|cycle|reset|break|stop]
 #
 # The tomato ripens as the session runs -- a seedling for the first third, a
 # leafy plant for the second, a tomato for the last -- and fades in ten steps
@@ -20,8 +20,14 @@
 # stretches, and style.css needs no edit. What must hold is that the class is
 # derived from progress through a stage, never from an absolute minute count.
 #
+# A second timer shares the widget: a short break, shown as a coffee cup that
+# DRAINS rather than ripens -- it starts at full opacity and fades as the break
+# is spent. `cycle` alternates the two, so $mod+Shift+t after a finished
+# pomodoro lands on the break, and after a break lands back on a pomodoro.
+#
 # Blinking comes for free from the module's `interval: 1`: the script is re-run
-# every second and alternates two classes on the wall clock's parity. That same
+# every second and alternates two classes on the wall clock's parity, divided by
+# BLINK so the flash can be slowed without touching the poll rate. That same
 # 1 Hz poll is why toggling from a key binding shows up immediately, with no
 # SIGRTMIN signalling to wire up.
 
@@ -31,6 +37,13 @@
 # this script once a second, so the next tick already uses the new value, and a
 # session in flight keeps its elapsed time and simply gets a new finish line.
 MINUTES=30
+# The short break, entered by hand with `cycle`. Never starts on its own: the
+# point is that you decide when the pomodoro is actually over.
+BREAK_MINUTES=5
+# Half-period of the expiry blink, in seconds. 1 is the old 1 Hz strobe; higher
+# is calmer. The module polls once a second regardless -- this only divides the
+# wall clock before its parity is taken, so any whole number works.
+BLINK=2
 # A short chirp, ~0.5s. Deliberately not an alarm: the blinking tomato is the
 # persistent signal, so this only has to mark the moment. Audition alternatives
 # with `paplay` before swapping -- the gnome theme keeps a large set under
@@ -46,21 +59,36 @@ CONF="${XDG_CONFIG_HOME:-$HOME/.config}/pomodoro.conf"
 # than an error anyone sees. Fall back instead.
 case "$MINUTES" in ''|*[!0-9]*) MINUTES=30 ;; esac
 [ "$MINUTES" -ge 3 ] 2>/dev/null || MINUTES=30    # 3 = one minute per ripening stage
+case "$BREAK_MINUTES" in ''|*[!0-9]*) BREAK_MINUTES=5 ;; esac
+[ "$BREAK_MINUTES" -ge 1 ] 2>/dev/null || BREAK_MINUTES=5
+case "$BLINK" in ''|*[!0-9]*) BLINK=2 ;; esac
+[ "$BLINK" -ge 1 ] 2>/dev/null || BLINK=2         # 0 would divide by zero once a second
 
-PERIOD=$(( MINUTES * 60 ))
-STAGE=$(( PERIOD / 3 ))         # ripening stage length; 3 stages fill PERIOD
 STATE="${XDG_RUNTIME_DIR:-/tmp}/pomodoro.state"
 
 SEEDLING=🌱                     # U+1F331
 HERB=🌿                         # U+1F33F
 TOMATO=🍅                       # U+1F345
+COFFEE=☕                         # U+2615, the break
 
-# State is one line: <idle|running|paused> <elapsed> <resumed_at> <chimed>
+# Which timer is on the clock decides the finish line, so PERIOD cannot be
+# settled until the state has been read.
+set_period() {
+    if [ "$kind" = break ]; then
+        PERIOD=$(( BREAK_MINUTES * 60 ))
+    else
+        PERIOD=$(( MINUTES * 60 ))
+    fi
+    STAGE=$(( PERIOD / 3 ))     # ripening stage length; 3 stages fill PERIOD
+}
+
+# State is one line: <idle|running|paused> <elapsed> <resumed_at> <chimed> <kind>
 #   elapsed     seconds banked before the current run (0 unless resumed)
 #   resumed_at  epoch the current run started; meaningless unless running
 #   chimed      1 once the expiry sound has played, so it fires once per session
+#   kind        work | break -- which timer this is, and so which finish line
 read_state() {
-    phase=idle elapsed=0 resumed=0 chimed=0
+    phase=idle elapsed=0 resumed=0 chimed=0 kind=work
     # Guard the redirect rather than silencing `read`: the shell reports a failed
     # input redirect itself, so a missing file would otherwise spam waybar's log
     # once a second until the first pomodoro is started.
@@ -68,28 +96,31 @@ read_state() {
     # `read` clobbers the variables even when it fails (an empty file leaves them
     # blank, not defaulted), so its status is ignored and the checks below are
     # what actually decide whether the values are usable.
-    read -r phase elapsed resumed chimed < "$STATE"
+    read -r phase elapsed resumed chimed kind < "$STATE"
 
     # Reject anything that isn't a well-formed line -- absent, truncated by a
     # crash mid-write, or hand-edited while testing -- rather than letting a
     # stray value reach the arithmetic below.
     case "$phase:$elapsed:$resumed:$chimed" in
         idle:*|running:*|paused:*) ;;
-        *) phase=idle elapsed=0 resumed=0 chimed=0; return ;;
+        *) phase=idle elapsed=0 resumed=0 chimed=0 kind=work; return ;;
     esac
     # Checked one field at a time, not concatenated: a truncated "running 0" line
     # leaves resumed and chimed empty, and "0"+""+"" would pass an all-digits test
     # on the joined string while still breaking the arithmetic below.
     for field in "$elapsed" "$resumed" "$chimed"; do
         case "$field" in
-            ''|*[!0-9]*) phase=idle elapsed=0 resumed=0 chimed=0; return ;;
+            ''|*[!0-9]*) phase=idle elapsed=0 resumed=0 chimed=0 kind=work; return ;;
         esac
     done
+    # A line written before `kind` existed has four fields and leaves it empty.
+    # Treat that as the work timer rather than discarding a live session.
+    case "$kind" in work|break) ;; *) kind=work ;; esac
 }
 
 write_state() {  # write atomically; the 1 Hz reader must never see a partial line
     tmp="$STATE.$$"
-    printf '%s %s %s %s\n' "$1" "$2" "$3" "$4" > "$tmp" && mv -f "$tmp" "$STATE"
+    printf '%s %s %s %s %s\n' "$1" "$2" "$3" "$4" "$5" > "$tmp" && mv -f "$tmp" "$STATE"
 }
 
 now() { date +%s; }
@@ -109,17 +140,32 @@ case "${1:-waybar}" in
     toggle)
         read_state
         case "$phase" in
-            idle)    write_state running 0 "$(now)" 0 ;;
-            running) write_state paused "$(effective)" 0 "$chimed" ;;
-            paused)  write_state running "$elapsed" "$(now)" "$chimed" ;;
+            idle)    write_state running 0 "$(now)" 0 "$kind" ;;
+            running) write_state paused "$(effective)" 0 "$chimed" "$kind" ;;
+            paused)  write_state running "$elapsed" "$(now)" "$chimed" "$kind" ;;
         esac
         ;;
 
-    reset)   write_state running 0 "$(now)" 0 ;;
-    stop)    write_state idle 0 0 0 ;;
+    # Alternate the two timers. From idle it starts a pomodoro, so the first
+    # press of the day is never a break; from anything else it starts whichever
+    # timer is not on the clock. A grown pomodoro is therefore followed by the
+    # break without having to name it, which is the whole point of the binding.
+    cycle)
+        read_state
+        if [ "$phase" = idle ] || [ "$kind" = break ]; then
+            write_state running 0 "$(now)" 0 work
+        else
+            write_state running 0 "$(now)" 0 break
+        fi
+        ;;
+
+    reset)   write_state running 0 "$(now)" 0 work ;;
+    break)   write_state running 0 "$(now)" 0 break ;;
+    stop)    write_state idle 0 0 0 work ;;
 
     waybar)
         read_state
+        set_period
         secs=$(effective)
 
         if [ "$phase" = idle ]; then
@@ -127,20 +173,44 @@ case "${1:-waybar}" in
             exit 0
         fi
 
+        # The two timers read in opposite directions: the pomodoro ripens and
+        # brightens towards its finish, the break holds one glyph and drains.
+        # Only the expiry blink is shared. `pomo-break` rides on top of whatever
+        # class is chosen, the way `pomo-paused` does, and carries the underline.
+        if [ "$kind" = break ]; then
+            glyph=$COFFEE
+            label=Break
+            extra=',"pomo-break"'
+        else
+            label=Pomodoro
+            extra=''
+        fi
+
         if [ "$secs" -ge "$PERIOD" ]; then
-            # Expired. Chime once, then blink at 1 Hz until reset.
+            # Expired. Chime once, then blink until you cycle on. Dividing the
+            # clock by BLINK before taking its parity is what slows the flash:
+            # BLINK seconds lit, BLINK dark, at an unchanged 1 Hz poll.
             if [ "$chimed" -eq 0 ]; then
                 paplay "$CHIME" >/dev/null 2>&1 &
                 chimed=1
-                write_state "$phase" "$elapsed" "$resumed" 1
+                write_state "$phase" "$elapsed" "$resumed" 1 "$kind"
             fi
-            glyph=$TOMATO
-            tip="Pomodoro - done, $(mmss $(( secs - PERIOD ))) over"
-            if [ $(( $(now) % 2 )) -eq 0 ]; then
-                class='"pomo-done"'
+            [ "$kind" = break ] || glyph=$TOMATO
+            tip="$label - done, $(mmss $(( secs - PERIOD ))) over"
+            if [ $(( $(now) / BLINK % 2 )) -eq 0 ]; then
+                class="\"pomo-done\"$extra"
             else
-                class='"pomo-done-off"'
+                class="\"pomo-done-off\"$extra"
             fi
+        elif [ "$kind" = break ]; then
+            # Ten steps down a contrast-even ramp, measured against the break's
+            # own length, so the cup empties at a steady visual rate whatever
+            # BREAK_MINUTES says. The last step is floored one below the array
+            # bound: at secs == PERIOD - 1 the division can still land on 10.
+            step=$(( secs * 10 / PERIOD ))
+            [ "$step" -gt 9 ] && step=9
+            class="\"pomo-brk$step\"$extra"
+            tip="Break - $(mmss "$secs") elapsed, $(mmss $(( PERIOD - secs ))) left"
         else
             stage=$(( secs / STAGE ))
             case $stage in
@@ -168,7 +238,7 @@ case "${1:-waybar}" in
         ;;
 
     *)
-        echo "usage: pomodoro [waybar|toggle|reset|stop]" >&2
+        echo "usage: pomodoro [waybar|toggle|cycle|reset|break|stop]" >&2
         exit 1
         ;;
 esac
