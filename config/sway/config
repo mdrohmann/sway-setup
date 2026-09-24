@@ -290,13 +290,16 @@ bindsym $mod+r mode "resize"
     bindsym $mod+Ctrl+p  exec wl-paste --primary --no-newline | wl-copy
 
     # Pomodoro (the waybar custom/pomodoro tomato). $mod+t pauses and resumes,
-    # $mod+Shift+t starts a fresh session. Left-click the tomato toggles,
-    # right-click resets, middle-click puts it back to idle.
+    # $mod+Shift+t alternates the two timers: a fresh pomodoro, then the short
+    # break, then a pomodoro again. From idle it always starts a pomodoro, and
+    # after one has finished ripening the next press is the break -- so the
+    # break is entered by hand, never automatically. Left-click the tomato
+    # toggles, right-click starts a fresh pomodoro, middle-click goes idle.
     #
-    # Session length lives in ~/.config/pomodoro.conf (MINUTES=30 by default),
+    # Both lengths live in ~/.config/pomodoro.conf (MINUTES, BREAK_MINUTES),
     # not here -- editing it takes effect on the next 1 Hz tick, with no reload.
     bindsym $mod+t exec ~/.local/bin/pomodoro toggle
-    bindsym $mod+Shift+t exec ~/.local/bin/pomodoro reset
+    bindsym $mod+Shift+t exec ~/.local/bin/pomodoro cycle
 
     # Slack, as a dedicated Chrome app window -- see ~/.local/bin/webapp, which
     # ~/.local/bin/slack is a one-line wrapper for. Toggles to its workspace and

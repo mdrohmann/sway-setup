@@ -23,26 +23,43 @@ Two conventions run through all of them:
 
 ## `pomodoro` — a tomato that ripens
 
-`$mod+t` toggles, `$mod+Shift+t` resets. Waybar polls `pomodoro waybar` once a
-second, and clicking the tomato works too (left toggle, middle stop, right
-reset).
+`$mod+t` toggles, `$mod+Shift+t` alternates the two timers — a fresh pomodoro,
+then the 5-minute break, then a pomodoro again. From idle it always starts a
+pomodoro, so the break is only ever entered deliberately, and a pomodoro that
+has finished ripening is followed by the break without naming it. Waybar polls
+`pomodoro waybar` once a second, and clicking the tomato works too (left toggle,
+middle stop, right starts a fresh pomodoro).
 
 The display is the interesting part. Rather than a countdown you have to read,
 the emoji ripens through its stages — 🌱 seedling, 🌿 herb, 🍅 tomato — and
 within each stage fades in via 30 CSS opacity classes, `pomo-m0` through
 `pomo-m29`, defined in [`waybar/style.css`](../config/waybar/style.css). You
 learn to read your remaining time peripherally, without parsing digits. On
-expiry it blinks at 1 Hz, forever, by alternating two classes on wall-clock
-parity.
+expiry it blinks forever by alternating two classes on wall-clock parity,
+divided by `BLINK` so the flash can be slowed without changing the poll rate.
 
-Session length is `MINUTES` in [`pomodoro.conf`](../config/pomodoro.conf),
-sourced as shell. Because waybar re-runs the script every second, editing that
+The break reads in the opposite direction: one glyph, ☕, starting at full
+opacity and draining as it is spent, over ten `pomo-brk0`..`pomo-brk9` steps,
+under a blue line (`pomo-break`) that shortens as the break is spent, so length
+carries the time remaining and the fade only says "this is a break". Growing
+means work; emptying means rest.
+
+That line is a hard-stop gradient painted into a 2px strip, not a border: a
+border spans the whole widget and its width is thickness, not length.
+
+Both lengths (`MINUTES`, `BREAK_MINUTES`) and the blink rate (`BLINK`) live in
+[`pomodoro.conf`](../config/pomodoro.conf), sourced as shell. Because waybar re-runs the script every second, editing that
 file takes effect on the next tick — nothing to restart. A pomodoro already
 running keeps its elapsed time and simply gets a new finish line.
 
-The opacity ramp is calibrated against waybar's exact `#323232` background and
-the measured contrast of those specific glyphs. Changing the bar colour without
-recalculating the ramp will make the early stages invisible.
+The `pomo-m*` opacity ramp is calibrated against waybar's exact `#323232`
+background and the measured contrast of those specific glyphs. Changing the bar
+colour without recalculating the ramp will make the early stages invisible.
+
+The break's ten steps need no such cross-glyph calibration — a single glyph has
+no stage boundary to go backwards over — and are spaced so the cup's measured
+contrast falls in equal increments rather than its opacity, which would look
+static for most of the break and then collapse at the end.
 
 ## `claude-sessions` — jump to the right terminal
 
