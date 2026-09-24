@@ -285,6 +285,9 @@ bindsym $mod+r mode "resize"
     # Clipboard history: pick an entry, or delete one from the history.
     bindsym $mod+p       exec cliphist list | wmenu -l 20 -p clipboard | cliphist decode | wl-copy
     bindsym $mod+Shift+p exec cliphist list | wmenu -l 20 -p delete | cliphist delete
+    # Promote the current selection to CLIPBOARD, on demand. clip-sync only
+    # mirrors the other way, so selected text is not Ctrl+V-able until this.
+    bindsym $mod+Ctrl+p  exec wl-paste --primary --no-newline | wl-copy
 
     # Pomodoro (the waybar custom/pomodoro tomato). $mod+t pauses and resumes,
     # $mod+Shift+t starts a fresh session. Left-click the tomato toggles,
@@ -377,9 +380,11 @@ bar {
 
 ### Clipboard ################################################################
 #
-# Keep PRIMARY (select / middle-click) and CLIPBOARD (Ctrl+C / Ctrl+V) in sync.
+# Mirror CLIPBOARD (Ctrl+C) into PRIMARY, one direction only. The reverse
+# direction breaks web apps: in Google Slides, selecting text sets PRIMARY,
+# which would overwrite CLIPBOARD and clobber whatever you just copied.
 # `exec`, not `exec_always`: a reload must not spawn a second copy.
-exec ~/.local/bin/clip-sync both
+exec ~/.local/bin/clip-sync clipboard-to-primary
 
 # Clipboard history (cliphist). Text and images are stored separately.
 exec wl-paste --type text  --watch cliphist store
