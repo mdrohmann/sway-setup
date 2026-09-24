@@ -9,3 +9,7 @@
 # is tracked so the include has somewhere to look; its contents are not.
 config/sway/config.d/*
 !config/sway/config.d/.gitkeep
+
+# Writing drafts for the Medium post and the video. Working notes, not part of
+# the setup -- the repo ships a README, not an account of how it was written.
+drafts/
