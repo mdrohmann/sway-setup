@@ -15,5 +15,13 @@
 # Don't fight an existing lock instance for the ext-session-lock.
 pidof hyprlock >/dev/null && exit 0
 
+# Phone push notifications (Moshi) only while locked: the moshi-hook daemon
+# runs for the duration of the lock and is stopped again on unlock. With the
+# daemon down, `moshi-hook claude-hook` exits 0 immediately with no output, so
+# Claude Code hooks don't stall. The unit is disabled at login for the same
+# reason. `systemctl --user start moshi-hook` still works for a manual override.
+systemctl --user --no-block start moshi-hook
+
 hyprlock
+systemctl --user --no-block stop moshi-hook
 swaymsg "output * power on" >/dev/null
