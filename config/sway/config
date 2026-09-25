@@ -117,7 +117,9 @@ input type:keyboard {
     bindsym $mod+d exec $menu
     # rofi runs alongside wmenu, not instead of it: drun lists .desktop entries
     # with real names/icons, and -show window jumps to any window by title.
+    #: Launcher with .desktop names and icons (rofi drun)
     bindsym $mod+Shift+d exec rofi -show drun
+    #: Jump to any window by title (rofi)
     bindsym $mod+o exec rofi -show window
 
     # Drag floating windows by holding down $mod and left mouse button.
@@ -130,6 +132,7 @@ input type:keyboard {
     # Reload the configuration file (with a confirmation notification)
     set $reload reload, exec notify-send -a sway -u low -t 1500 \
         -h string:x-dunst-stack-tag:sway-reload 'Sway' 'Config reloaded'
+    #: Reload the sway config
     bindsym $mod+Shift+c $reload
     bindsym $mod+Shift+r $reload
 
@@ -144,6 +147,7 @@ input type:keyboard {
     bindsym $mod+$up focus up
     bindsym $mod+$right focus right
     # Or use $mod+[up|down|left|right]
+    #: Move focus, with arrow keys
     bindsym $mod+Left focus left
     bindsym $mod+Down focus down
     bindsym $mod+Up focus up
@@ -155,6 +159,7 @@ input type:keyboard {
     bindsym $mod+Shift+$up move up
     bindsym $mod+Shift+$right move right
     # Ditto, with arrow keys
+    #: Move the focused window, with arrow keys
     bindsym $mod+Shift+Left move left
     bindsym $mod+Shift+Down move down
     bindsym $mod+Shift+Up move up
@@ -203,7 +208,9 @@ input type:keyboard {
     # You can "split" the current object of your focus with
     # $mod+b or $mod+v, for horizontal and vertical splits
     # respectively.
+    #: Split horizontally: the next window opens beside this one
     bindsym $mod+b splith
+    #: Split vertically: the next window opens below this one
     bindsym $mod+v splitv
 
     # Switch the current container between different layout styles
@@ -245,12 +252,14 @@ mode "resize" {
     # right will grow the containers width
     # up will shrink the containers height
     # down will grow the containers height
+    #: Resize the focused window
     bindsym $left resize shrink width 10px
     bindsym $down resize grow height 10px
     bindsym $up resize shrink height 10px
     bindsym $right resize grow width 10px
 
     # Ditto, with arrow keys
+    #: Resize the focused window, with arrow keys
     bindsym Left resize shrink width 10px
     bindsym Down resize grow height 10px
     bindsym Up resize shrink height 10px
@@ -260,6 +269,7 @@ mode "resize" {
     bindsym Return mode "default"
     bindsym Escape mode "default"
 }
+#: Resize the focused window (enters resize mode)
 bindsym $mod+r mode "resize"
 #
 # Utilities:
@@ -283,7 +293,9 @@ bindsym $mod+r mode "resize"
     # Full mixer.
     bindsym $mod+Shift+m exec $term -e alsamixer
     # Clipboard history: pick an entry, or delete one from the history.
+    #: Clipboard history: paste a previous entry
     bindsym $mod+p       exec cliphist list | wmenu -l 20 -p clipboard | cliphist decode | wl-copy
+    #: Clipboard history: delete an entry
     bindsym $mod+Shift+p exec cliphist list | wmenu -l 20 -p delete | cliphist delete
     # Promote the current selection to CLIPBOARD, on demand. clip-sync only
     # mirrors the other way, so selected text is not Ctrl+V-able until this.
@@ -298,7 +310,9 @@ bindsym $mod+r mode "resize"
     #
     # Both lengths live in ~/.config/pomodoro.conf (MINUTES, BREAK_MINUTES),
     # not here -- editing it takes effect on the next 1 Hz tick, with no reload.
+    #: Pomodoro: start or stop the timer
     bindsym $mod+t exec ~/.local/bin/pomodoro toggle
+    #: Pomodoro: cycle work/break
     bindsym $mod+Shift+t exec ~/.local/bin/pomodoro cycle
 
     # Slack, as a dedicated Chrome app window -- see ~/.local/bin/webapp, which
@@ -314,6 +328,7 @@ bindsym $mod+r mode "resize"
     # Calendar gets no key of its own: on a tabbed workspace $mod+$left and
     # $mod+$right already cycle the tabs. Pressing $mod+m again from the Calendar
     # tab brings Gmail forward; pressing it from Gmail leaves.
+    #: Gmail and Google Calendar, tabbed on one workspace
     bindsym $mod+m exec ~/.local/bin/webapp gmail toggle
 
     # Jump to a Claude Code session by name -- see ~/.local/bin/claude-sessions.
@@ -324,10 +339,20 @@ bindsym $mod+r mode "resize"
     # called -- for a herdr pane that is the workspace label.
     bindsym $mod+g exec ~/.local/bin/claude-sessions menu
 
+    # Every binding in this file, with its description, in a rofi picker -- see
+    # ~/.local/bin/keys. Picking one runs it. Descriptions are parsed out of the
+    # comments here, so there is nothing to keep in sync: a "#:" line is an
+    # explicit one, otherwise it is the first sentence of the comment above.
+    bindsym $mod+slash exec ~/.local/bin/keys menu
+
     # Dismiss dunst notifications.
+    #: Dismiss the notification on screen
     bindsym $mod+n            exec dunstctl close
+    #: Dismiss every notification on screen
     bindsym $mod+Shift+n      exec dunstctl close-all
+    #: Bring back the last dismissed notification (again for the one before)
     bindsym $mod+Ctrl+n       exec dunstctl history-pop
+    #: Pause or resume notifications
     bindsym $mod+Ctrl+Shift+n exec dunstctl set-paused toggle
 
     # Special keys to adjust brightness via brightnessctl, with a dunst OSD
@@ -339,10 +364,15 @@ bindsym $mod+r mode "resize"
     bindsym --locked Shift+XF86MonBrightnessUp   exec $brightness up 1
     # Screenshots via grimshot: save to $XDG_PICTURES_DIR, or copy to clipboard.
     # 'area' and 'window' select interactively via slurp.
+    #: Screenshot the whole screen to a file
     bindsym Print            exec grimshot --notify save screen
+    #: Screenshot a selected area to a file
     bindsym Shift+Print      exec grimshot --notify save area
+    #: Screenshot the focused window to a file
     bindsym $mod+Print       exec grimshot --notify save active
+    #: Screenshot the whole screen to the clipboard
     bindsym Ctrl+Print       exec grimshot --notify copy screen
+    #: Screenshot a selected area to the clipboard
     bindsym Ctrl+Shift+Print exec grimshot --notify copy area
 
 #

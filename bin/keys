@@ -1,0 +1,242 @@
+#!/bin/sh
+# Show every sway key binding in a rofi picker, and run the one you choose.
+#
+# Usage: keys [menu|list]
+#
+# sway has no IPC for this -- `swaymsg -t get_binding_modes` names the modes and
+# nothing inside them -- so the config is the only source, and this parses it:
+# the same files sway itself reads, in the same order, so a binding that is here
+# is a binding that is live.
+#
+# A description comes from the comment above a binding, because that config is
+# already commented in prose and re-stating it in a second place would rot. Two
+# forms, in order:
+#
+#   #: Jump to a Claude session      an override, written for the menu
+#   # Jump to a Claude session ...   otherwise: the first sentence of the block
+#
+# Both are sticky: they describe every binding below them until the next
+# paragraph. So one "#:" covers a group that shares a comment, and a "#:" per
+# line tells apart the ones that need it -- the four dunst keys under a single
+# "Dismiss dunst notifications" being the case that asks for it. Everything else
+# reads well enough with no annotation at all.
+#
+# The expanded command is shown alongside and is searchable, so `dunstctl` or
+# `grimshot` finds a row whatever its description says.
+
+US=$(printf '\037')
+
+# The files sway reads, in its order: variables have to be seen before the
+# bindings that use them, and a later file may redefine one.
+config_files() {
+    printf '%s\n' "${SWAY_CONFIG:-$HOME/.config/sway/config}"
+    for f in /etc/sway/config-vars.d/* /etc/sway/config.d/* \
+             "$HOME/.config/sway/config.d/"*.conf; do
+        [ -f "$f" ] && printf '%s\n' "$f"
+    done
+}
+
+# -> mode<US>key<US>description<US>command, in config order.
+parse() {
+    # shellcheck disable=SC2046
+    awk -v US="$US" '
+    # $mod, $term, $volume ... A value can itself hold variables ($reload is two
+    # commands, one of which is an exec), so expansion runs until it settles.
+    # Every local is a parameter: awk has no other kind, and a stray global here
+    # silently carries half of one expanded key into the next binding.
+    function expand(s,   round, res, i, name, before) {
+        for (round = 0; round < 5; round++) {
+            if (index(s, "$") == 0) break
+            before = s; res = ""
+            while ((i = index(s, "$")) > 0) {
+                res = res substr(s, 1, i - 1)
+                s = substr(s, i)
+                if (match(s, /^\$[A-Za-z_][A-Za-z0-9_]*/)) {
+                    name = substr(s, 1, RLENGTH)
+                    res = res (name in var ? var[name] : name)
+                    s = substr(s, RLENGTH + 1)
+                } else { res = res "$"; s = substr(s, 2) }
+            }
+            s = res s
+            if (s == before) break
+        }
+        return s
+    }
+
+    # One line out of a paragraph. Everything after the first full stop is the
+    # reasoning -- worth reading in the file, not in a menu row -- and an aside
+    # opened with " -- " is the same thing without the full stop.
+    function firstsent(t,   p) {
+        if (t == "") return ""
+        if (match(t, /\. /)) t = substr(t, 1, RSTART)
+        p = index(t, " -- ")
+        if (p > 0) t = substr(t, 1, p - 1)
+        sub(/\.$/, "", t)
+        gsub(/^[ \t]+|[ \t]+$/, "", t)
+        return t
+    }
+
+    # Continuations first: a trailing backslash means the statement is not over,
+    # and $reload is written that way. The backslash becomes the space that
+    # joins the two halves, and the indent of the continued line goes -- sway
+    # collapses both, and leaving them in puts a gap in the middle of a command.
+    { line = $0
+      if (held != "") { sub(/^[ \t]+/, "", line); line = held line }
+      if (line ~ /\\$/) { sub(/[ \t]*\\$/, " ", line); held = line; next }
+      held = "" }
+
+    line ~ /^[ \t]*#/ {
+        sub(/^[ \t]*#[ \t]?/, "", line)
+        # An empty comment line is the paragraph break this config uses, and
+        # section headings are fenced with them -- without this rule "Moving
+        # around:"
+        # would glue itself to the description of the binding below it.
+        if (line ~ /^[ \t]*$/) { block = ""; ann = ""; next }
+        if (line ~ /^:/) { sub(/^:[ \t]*/, "", line); ann = line; spent = 0; next }
+        # A comment AFTER a binding starts a new paragraph even with no blank
+        # line between them, which is how the workspace bindings are written --
+        # and a new paragraph drops the override the old one carried.
+        if (spent) { block = line; ann = "" } else block = (block == "" ? line : block " " line)
+        spent = 0
+        next
+    }
+    line ~ /^[ \t]*$/ { block = ""; ann = ""; spent = 0; next }
+
+    line ~ /^[ \t]*set[ \t]+\$/ {
+        sub(/^[ \t]*set[ \t]+/, "", line)
+        if ((i = index(line, " ")) == 0) next
+        v = substr(line, i + 1); gsub(/^[ \t]+|[ \t]+$/, "", v)
+        var[substr(line, 1, i - 1)] = v
+        block = ""; ann = ""; spent = 0; next
+    }
+
+    # Bindings inside a mode are only reachable from that mode, so the row says
+    # which one rather than pretending the key works from anywhere.
+    line ~ /^[ \t]*mode[ \t]+"/ && line ~ /\{[ \t]*$/ {
+        sub(/^[ \t]*mode[ \t]+"/, "", line); sub(/".*$/, "", line)
+        mode = line; block = ""; ann = ""; spent = 0; next
+    }
+    line ~ /^[ \t]*\}[ \t]*$/ { mode = ""; block = ""; ann = ""; spent = 0; next }
+
+    line ~ /^[ \t]*bindsym[ \t]/ {
+        sub(/^[ \t]*bindsym[ \t]+/, "", line)
+        while (line ~ /^--[a-z-]+[ \t]/) sub(/^--[a-z-]+[ \t]+/, "", line)
+        if ((i = index(line, " ")) == 0) next
+        key = substr(line, 1, i - 1)
+        cmd = substr(line, i + 1); gsub(/^[ \t]+|[ \t]+$/, "", cmd)
+        # The description is expanded too: a comment that says "$mod+$left" is
+        # telling you about a key, and the whole point of the row is to show it.
+        print mode US expand(key) US expand(ann != "" ? ann : firstsent(block)) US expand(cmd)
+        # Both descriptions stay: they may cover the bindings below too. But the
+        # paragraph is now spent, so a comment that follows replaces it instead
+        # of extending it.
+        spent = 1
+        next
+    }
+
+    # Anything else ends the block -- a comment two statements up is not about
+    # the binding after them.
+    { block = ""; ann = ""; spent = 0 }
+    ' $(config_files)
+}
+
+# A description column is only as narrow as its longest entry, and one comment
+# that runs on would push every row past the edge of the picker.
+CLIP=64
+
+# Every row, as rofi markup, in one awk pass.
+#
+# The obvious shell version -- pad, clip and escape each field with wc and sed --
+# costs eight processes a row, which is four and a half seconds for a hundred
+# bindings and far too slow for something you hold a key down for. This is one
+# process for the lot.
+#
+# It also has to measure what rofi DRAWS, and awk's length() counts bytes. A
+# UTF-8 character is one lead byte plus continuation bytes in 0x80-0xBF, so
+# skipping those counts characters -- near enough, since a description is prose
+# and not the double-width scripts that would need a real wcwidth.
+render() {  # reads mode<US>key<US>desc<US>cmd, writes one markup row each
+    awk -F"$US" -v clip="$CLIP" '
+    function dwidth(s,   i, n, c, w) {
+        n = length(s)
+        for (i = 1; i <= n; i++) {
+            c = substr(s, i, 1)
+            if (c >= "\200" && c <= "\277") continue
+            w++
+        }
+        return w
+    }
+    function clipw(s, m,   i, n, c, w, out) {
+        if (dwidth(s) <= m) return s
+        n = length(s)
+        for (i = 1; i <= n; i++) {
+            c = substr(s, i, 1)
+            if (c >= "\200" && c <= "\277") { out = out c; continue }
+            if (w >= m) break
+            w++; out = out c
+        }
+        return out "…"
+    }
+    function pad(s, m,   need) { for (need = m - dwidth(s); need > 0; need--) s = s " "; return s }
+    # Pango markup. "&" first, or the escapes escape each other. In a gsub
+    # replacement "&" means the match, so a literal one is written "\\&".
+    function esc(s) { gsub(/&/, "\\&amp;", s); gsub(/</, "\\&lt;", s)
+                      gsub(/>/, "\\&gt;", s); return s }
+
+    { mode = $1; key = $2
+      # A key inside a mode is not reachable from the default mode, so the row
+      # shows what you would actually have to type to get there.
+      if (mode != "") key = mode ": " key
+      k[NR] = key; d[NR] = clipw($3, clip); c[NR] = $4
+      if (dwidth(key) > wk) wk = dwidth(key)
+      if (dwidth(d[NR]) > wd) wd = dwidth(d[NR]) }
+
+    END {
+        for (i = 1; i <= NR; i++)
+            # The command is not padded or clipped: it is the last column, so a
+            # long one only runs past the edge of its own row, and rofi matches
+            # on what is shown -- clipping it would stop `grimshot` finding its
+            # rows.
+            printf "<b>%s</b>  %s  <span foreground=\"#5c5c5c\">%s</span>\n",
+                   esc(pad(k[i], wk)), esc(pad(d[i], wd)), esc(c[i])
+    }'
+}
+
+case "${1:-menu}" in
+    list)
+        printf 'MODE\tKEY\tDESCRIPTION\tCOMMAND\n'
+        parse | while IFS=$US read -r mode key desc cmd; do
+            printf '%s\t%s\t%s\t%s\n' "${mode:--}" "$key" "${desc:--}" "$cmd"
+        done
+        ;;
+
+    menu)
+        rows=$(parse)
+        [ -n "$rows" ] || { notify-send -a sway -u normal -t 4000 \
+            -h string:x-dunst-stack-tag:keys \
+            'Shortcuts' 'No bindings found in the sway config'; exit 1; }
+
+        # Two parallel lists, as in claude-sessions: what rofi shows, and what
+        # each row runs. -format i hands back the chosen INDEX, so nothing has
+        # to be parsed back out of a decorated display string.
+        menu=$(printf '%s\n' "$rows" | render)
+        cmds=$(printf '%s\n' "$rows" | cut -d"$US" -f4)
+
+        idx=$(printf '%s\n' "$menu" | rofi -dmenu -i -markup-rows -format i \
+                  -p keys -no-custom) || exit 0
+        [ -n "$idx" ] || exit 0
+        cmd=$(printf '%s\n' "$cmds" | sed -n "$(( idx + 1 ))p")
+        [ -n "$cmd" ] || exit 0
+
+        # Run it the way the key would: sway parses the same command text, so a
+        # row does exactly what pressing the key does -- including the ones that
+        # only make sense against the window that had focus a moment ago.
+        swaymsg -- "$cmd" >/dev/null || notify-send -a sway -u normal -t 4000 \
+            -h string:x-dunst-stack-tag:keys 'Shortcuts' "sway refused: $cmd"
+        ;;
+
+    *)
+        echo "usage: keys [list|menu]" >&2
+        exit 1
+        ;;
+esac

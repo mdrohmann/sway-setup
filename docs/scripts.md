@@ -98,6 +98,30 @@ Session data comes from `~/.claude/sessions/<pid>.json` and the transcript
 `.jsonl`, read backwards with `tac | grep -m1 '"usage"'` so context accounting
 costs one line and not a whole file.
 
+## `keys` — the bindings, as a menu
+
+`$mod+slash` lists every binding in the sway config with what it does, and runs
+the one you pick. It is a cheat sheet you can act on, which is most of why it is
+worth having over a printed one.
+
+sway has no IPC for this — `swaymsg -t get_binding_modes` names the modes and
+nothing inside them — so the config is the source, parsed the way sway reads it:
+the same files in the same order, `set $var` expanded (recursively, because
+`$reload` is built out of two commands), `\`-continuations joined, and `mode`
+blocks tracked so a binding that only works inside one says so.
+
+Descriptions come from the comments that are already there, rather than a second
+list that would drift out of date. The first sentence of the comment block above
+a binding is the description; everything after it is the reasoning, which belongs
+in the file and not in a menu row. A `#:` line overrides that where the derived
+text is wrong or where one comment covers a group that needs telling apart — the
+four `dunstctl` keys being the case that asks for it. Both are sticky until the
+next paragraph, so one annotation covers a run of bindings.
+
+Picking a row runs it through `swaymsg`, which parses the same command text sway
+parses from the config — so a row does exactly what the key does, including the
+ones that only make sense against whatever had focus a moment ago.
+
 ## `webapp` — web apps that behave like applications
 
 `$mod+c` for Slack, `$mod+m` for Gmail (and `calendar` is configured, unbound).
