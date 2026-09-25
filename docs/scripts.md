@@ -70,10 +70,24 @@ is gone. Picking one focuses the terminal hosting it.
 Finding that terminal is the whole trick, and there is no API for it. The
 script walks `/proc` ancestry — `PPid` from `/proc/<pid>/status`, plus
 `starttime` from `/proc/<pid>/stat` to defend against PID reuse — until it
-reaches a process sway knows about in `swaymsg -t get_tree`. If the session is
-inside tmux, ancestry dead-ends at the server, so it takes a second path
-through `tmux list-clients`, mapping `client_tty` back to a process by its
-`/proc/*/fd/0`.
+reaches a process sway knows about in `swaymsg -t get_tree`.
+
+A multiplexer breaks that, because ancestry dead-ends at a detached server, and
+both of them are handled by finding the window the **client** is in instead.
+For tmux that means `tmux list-clients`, mapping `client_tty` back to a process
+by its `/proc/*/fd/0`. For herdr it means the socket API: `herdr pane list` plus
+one `herdr pane process-info` per pane gives pid → pane, and the client is
+whichever `herdr` process (not the server) resolves to a window. Focusing then
+takes two steps — sway focuses that terminal, then `herdr workspace/tab/agent
+focus` walks herdr to the pane. A herdr row is labelled with its **workspace
+label**, not the window title: every pane shares one window, so the title would
+label every herdr row identically.
+
+The four statuses Claude Code writes are `waiting` (blocked on you — the
+`waitingFor` field says on what), `idle` (ready), `busy` (mid-turn) and `shell`
+(idle, but the terminal is showing a shell). Only `waiting` sorts to the top;
+treating an unrecognised status as urgent instead is what once parked a
+backgrounded `shell` session at the top of the menu claiming to want input.
 
 It also drives a waybar module and fires a notification on the edge from
 "working" to "ready", which is the moment you actually want to know about.

@@ -318,9 +318,10 @@ bindsym $mod+r mode "resize"
 
     # Jump to a Claude Code session by name -- see ~/.local/bin/claude-sessions.
     # Lists every live session with whether it is working or waiting on you, and
-    # focuses the terminal hosting the one you pick (including through tmux).
-    # Rows lead with the WINDOW's name, so this picker and $mod+o agree on what
-    # everything is called.
+    # focuses the terminal hosting the one you pick (including through tmux and
+    # through herdr, where it also walks herdr to the right pane). Rows lead with
+    # the WINDOW's name, so this picker and $mod+o agree on what everything is
+    # called -- for a herdr pane that is the workspace label.
     bindsym $mod+g exec ~/.local/bin/claude-sessions menu
 
     # Dismiss dunst notifications.

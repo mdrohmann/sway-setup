@@ -27,7 +27,7 @@ so you read it out of the corner of your eye instead of parsing a countdown.
 | | Key | What it does |
 |---|---|---|
 | [`named-term`](bin/named-term) | `$mod+Return` | Terminals named `brave otter - ~/ion/core`, so `rofi -show window` is navigable. Opens in the focused terminal's directory. |
-| [`claude-sessions`](bin/claude-sessions) | `$mod+g` | Lists running Claude Code sessions with status and context usage; jumps to the terminal hosting one, through tmux if needed. |
+| [`claude-sessions`](bin/claude-sessions) | `$mod+g` | Lists running Claude Code sessions with status and context usage; jumps to the terminal hosting one, through tmux or herdr if needed. |
 | [`webapp`](bin/webapp) / [`slack`](bin/slack) | `$mod+c`, `$mod+m` | Slack and Gmail as Chrome app windows pinned to named workspaces, with unread counts scraped from the window title. |
 | [`pomodoro`](bin/pomodoro) | `$mod+t` | A tomato in the bar that ripens 🌱 → 🌿 → 🍅 as the session runs, then blinks. |
 | [`lock-session`](bin/lock-session) | `$mod+Ctrl+l` | Wraps hyprlock. Nineteen lines, two of which are bug fixes — see below. |
@@ -220,7 +220,8 @@ change a setting, which makes a symlinked copy a permanent source of dirty
 - **`claude-sessions` reads Claude Code's internal layout** under
   `~/.claude/sessions` and `~/.claude/projects`. That is undocumented and
   version-coupled; expect it to need a fix after an update, and to show nothing
-  at all on a machine without Claude Code.
+  at all on a machine without Claude Code. The same goes for its herdr support,
+  which talks to `herdr`'s socket API and quietly does nothing without it.
 - **`foot.ini` pins `shell=/usr/bin/zsh`.** Without zsh installed, foot exits
   the moment it opens — which in a fresh session means no terminal and no way
   to fix the config that is causing it. `install.sh` warns about this loudly.
