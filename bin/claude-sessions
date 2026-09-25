@@ -12,6 +12,11 @@
 # matching titles -- that works whatever a window happens to be called. Titles
 # are read only afterwards, to LABEL the row you are about to pick; see
 # window_label for why only a locked title is trusted.
+#
+# Two hosts break that ancestry, and break it the same way: under tmux and under
+# herdr a session's parents run up into a DETACHED server, never into a window.
+# Both are handled by resolving the window of the CLIENT instead, and then
+# steering the host to the right pane once sway has focused it.
 
 # Fields are separated by US (0x1f), never by tab: tab counts as IFS whitespace,
 # so `read` collapses runs of it and an empty field (no tmux, no waitingFor)
@@ -95,11 +100,108 @@ win_for_tmux() {
     return 1
 }
 
-# Focusing only ever needs the first field. Written as an assignment rather than
-# a `| cut` so the lookup's failure is still this function's exit status -- cut
-# succeeds on empty input, which would make "no window" look like a hit.
-con_for_ancestry() { w=$(win_for_ancestry "$1") || return 1; printf '%s\n' "${w%%"$US"*}"; }
-con_for_tmux()     { w=$(win_for_tmux     "$1") || return 1; printf '%s\n' "${w%%"$US"*}"; }
+# --- herdr -----------------------------------------------------------------
+# herdr multiplexes terminals the way tmux does, so a session started in one of
+# its panes has the same broken ancestry: claude -> zsh -> `herdr server`, which
+# is detached and owns no window. Without this a herdr-hosted session still
+# listed -- its json is written like any other -- but resolved to no window at
+# all, so picking it could only report a pid it could not place.
+#
+# The pane map is built from the socket API, and lazily: nothing here runs until
+# a row has failed to resolve through plain ancestry, so the waybar path (which
+# never resolves a window) and every foot-hosted row pay nothing. Calls are
+# ~5ms each and there are only a handful of panes.
+#
+# One session's worth of panes: `herdr` talks to the default socket, so panes
+# belonging to another named `herdr --session` are not seen here.
+HERDR=$(command -v herdr 2>/dev/null) || HERDR="$HOME/.local/bin/herdr"
+
+# pid -> "pane_id<US>ws_id<US>tab_id<US>ws_label<US>title", one line per pid in
+# a pane: its shell, and whatever is in the foreground. The workspace LABEL rides
+# along because that -- not the terminal window, which every pane shares -- is
+# what a herdr row is labelled with.
+#
+# The title is the pane's, and only when Claude Code wrote it: Claude Code
+# prefixes its terminal title with a marker (a spinner while it works, a static
+# one otherwise), which herdr keeps in terminal_title and removes from
+# terminal_title_stripped. That prefix is the whole test -- without it the title
+# is the shell's idea of one ("martin@host: ~/ion"), which says nothing a row
+# does not already show. Same reasoning as window_label: a title is worth
+# reading only while something is holding it steady.
+HERDR_PANES= HERDR_LOADED=
+load_herdr() {
+    [ -n "$HERDR_LOADED" ] && return
+    HERDR_LOADED=1
+    [ -x "$HERDR" ] || return
+    # Which pane a pid sits in needs a process-info call PER pane, but the map is
+    # then built by a single jq over all of them at once: jq's startup dominates
+    # this, and every record names the pane it belongs to, so one stream of
+    # replies carries enough to join panes, workspaces and pids without a jq (or
+    # an awk) per pane. A reply for a pane that has since closed carries an
+    # "error" instead of a process_info and drops out on its own.
+    ids=$("$HERDR" pane list 2>/dev/null | jq -r '.result.panes[]?.pane_id' 2>/dev/null)
+    [ -n "$ids" ] || return
+    HERDR_PANES=$({
+        "$HERDR" pane list
+        "$HERDR" workspace list
+        for i in $ids; do "$HERDR" pane process-info --pane "$i"; done
+    } 2>/dev/null | jq -n -r --arg us "$US" '
+        [inputs] as $in
+        | ($in | map(.result.workspaces? // empty) | add // []
+           | map({key: .workspace_id, value: (.label // "")}) | from_entries) as $lab
+        | ($in | map(.result.panes? // empty) | add // []
+           | map({key: .pane_id, value: .}) | from_entries) as $pane
+        | $in | map(.result.process_info? // empty) | .[]
+        | . as $pi
+        | ($pane[$pi.pane_id] // {}) as $p
+        | ($lab[$p.workspace_id] // "") as $l
+        | (($p.terminal_title // "") | test("^[\u2733\u25d0\u25d1] ")) as $own
+        | [$pi.shell_pid, ($pi.foreground_processes[]?.pid)] | map(select(. != null)) | .[]
+        | [(.|tostring), $pi.pane_id, ($p.workspace_id // ""), ($p.tab_id // ""),
+           (if $l == "" then ($p.workspace_id // "") else $l end),
+           (if $own then (($p.terminal_title_stripped // "")
+                          | if length > 40 then .[0:39] + "\u2026" else . end)
+                     else "" end)]
+        | join($us)' 2>/dev/null)
+}
+
+# Walk up until a parent is a process herdr knows about. Same shape and same
+# bound as win_for_ancestry.
+herdr_for_ancestry() {
+    load_herdr
+    [ -n "$HERDR_PANES" ] || return 1
+    p=$1 n=0
+    while [ -n "$p" ] && [ "$p" -gt 1 ] 2>/dev/null && [ "$n" -lt 40 ]; do
+        r=$(printf '%s\n' "$HERDR_PANES" \
+            | awk -F"$US" -v q="$p" '$1==q{print $2 FS $3 FS $4 FS $5 FS $6; exit}')
+        [ -n "$r" ] && { printf '%s\n' "$r"; return 0; }
+        p=$(ppid_of "$p"); n=$((n + 1))
+    done
+    return 1
+}
+
+# The window every herdr pane is seen through: the terminal a herdr CLIENT is
+# attached in. Found by comm rather than by walking clients like tmux does,
+# because herdr's socket API describes panes, not the terminals showing them.
+# The server is skipped by its argv -- it is detached, so it would fail to
+# resolve anyway, but a `herdr server` someone started in a foreground terminal
+# would otherwise hand back that terminal.
+HERDR_WIN= HERDR_WIN_LOADED=
+herdr_client_win() {
+    if [ -z "$HERDR_WIN_LOADED" ]; then
+        HERDR_WIN_LOADED=1
+        for f in $(grep -lsx herdr /proc/[0-9]*/comm 2>/dev/null); do
+            c=${f#/proc/}; c=${c%/comm}
+            case "$(tr '\0' ' ' < "/proc/$c/cmdline" 2>/dev/null)" in
+                *' server '*) continue ;;
+            esac
+            HERDR_WIN=$(win_for_ancestry "$c") && break
+            HERDR_WIN=
+        done
+    fi
+    [ -n "$HERDR_WIN" ] || return 1
+    printf '%s\n' "$HERDR_WIN"
+}
 
 # The label for a row: the name of the window it will focus.
 #
@@ -124,16 +226,69 @@ window_label() {  # app_id, title -> label (empty if neither is usable)
     printf '\n'
 }
 
-# The window a row lives in, as "con_id<US>app_id<US>title". tmux first: a
-# session in a pane has no window of its own in the ancestry sense.
-win_for_row() {  # pid, tmux-location
-    [ -n "$2" ] && { win_for_tmux "$2"; return; }
-    win_for_ancestry "$1"
+# Where a row lives, resolved once and left in globals, because each row is
+# resolved up to three times -- for its label, for the WHERE column, and again
+# when you pick it.
+#
+#   R_KIND  win | tmux | herdr | "" (nothing found)
+#   R_WIN   the sway window, "con_id<US>app_id<US>title", empty if none
+#   R_PANE  the herdr pane, "pane_id<US>ws_id<US>tab_id<US>ws_label<US>title"
+#
+# Order matters: plain ancestry is tried first because it is free, and it is
+# also what keeps the herdr socket out of the picture for every row that does
+# not need it.
+R_FOR= R_KIND= R_WIN= R_PANE=
+resolve_row() {  # pid, tmux-location
+    [ "$R_FOR" = "$1" ] && return 0
+    R_FOR=$1 R_KIND= R_WIN= R_PANE=
+    if [ -n "$2" ]; then
+        R_KIND=tmux
+        R_WIN=$(win_for_tmux "$2") || R_WIN=
+        return 0
+    fi
+    if R_WIN=$(win_for_ancestry "$1"); then R_KIND=win; return 0; fi
+    R_WIN=
+    if R_PANE=$(herdr_for_ancestry "$1"); then
+        R_KIND=herdr
+        R_WIN=$(herdr_client_win) || R_WIN=
+        return 0
+    fi
+    R_PANE=
+    return 0
+}
+
+# The name a row is shown under. A session names itself, and when it has really
+# done so -- a name you typed, one it chose out of the conversation, one a hook
+# set -- that name wins. What it falls back to otherwise is "derived": the
+# directory plus a couple of hash characters, which tells two sessions in one
+# repo apart and nothing else.
+#
+# A herdr pane can do better for exactly those rows, because Claude Code has
+# already written the conversation's own title into the pane. Borrowing it only
+# where the name is derived keeps the rule one-way: a name the session or you
+# chose is never overwritten by a title that trails it by a turn.
+set_display_name() {  # name, nameSource -> DISPLAY_NAME (reads resolve_row's globals)
+    DISPLAY_NAME=$1
+    case "$2" in derived|'') ;; *) return 0 ;; esac
+    [ "$R_KIND" = herdr ] || return 0
+    t=${R_PANE##*"$US"}
+    [ -n "$t" ] && DISPLAY_NAME=$t
+    return 0
 }
 
 label_for_row() {  # pid, tmux-location
-    w=$(win_for_row "$1" "$2") || return 1
-    rest=${w#*"$US"}
+    resolve_row "$1" "$2"
+    # A herdr row is labelled with the WORKSPACE it sits in, not with the window:
+    # every pane is seen through the one terminal the client runs in, so its
+    # locked title would label every herdr row identically. The workspace label
+    # is also the name you gave it, which is the point of the column.
+    if [ "$R_KIND" = herdr ]; then
+        rest=${R_PANE#*"$US"}; rest=${rest#*"$US"}; rest=${rest#*"$US"}
+        printf '%s\n' "${rest%%"$US"*}"
+        return 0
+    fi
+    [ -n "$R_WIN" ] || return 1
+    rest=${R_WIN#*"$US"}
     window_label "${rest%%"$US"*}" "${rest#*"$US"}"
 }
 
@@ -169,10 +324,10 @@ human_age() {  # seconds -> compact
 
 # --- enumeration -----------------------------------------------------------
 # Emits, US-separated:
-#   rank status pid name cwd age tmux waiting sid supd job kind bg
-# rank orders the menu: anything unrecognised first (requires_action, i.e. a
-# session blocked on a permission prompt, wants you more urgently than one that
-# merely finished), then ready, then working.
+#   rank status pid name cwd age tmux waiting sid supd job kind namesource bg
+# rank orders the menu: blocked first (a session sitting on a permission prompt
+# wants you more urgently than one that merely finished), then ready, then
+# working.
 enumerate() {
     now=$(date +%s)
     # One jq for every session file rather than one per file: jq startup dominates
@@ -184,21 +339,33 @@ enumerate() {
            (.procStart // ""), (.status // "?"), (.name // ""),
            (.cwd // ""), (.statusUpdatedAt // .startedAt // 0),
            (.tmux // ""), (.waitingFor // .detail // ""), (.sessionId // ""),
-           (.jobId // .parkedJobId // ""), (.kind // "")]
+           (.jobId // .parkedJobId // ""), (.kind // ""), (.nameSource // "")]
         | join($us)' "$SESSIONS"/*.json 2>/dev/null \
-    | while IFS=$US read -r pid pstart status name cwd supd tmx waiting sid job kind; do
+    | while IFS=$US read -r pid pstart status name cwd supd tmx waiting sid job kind nsrc; do
         case "$pid" in ''|*[!0-9]*) continue ;; esac
         is_live "$pid" "$pstart" || continue
 
+        # Claude Code writes exactly four statuses and drops anything else, so
+        # this list is the whole vocabulary rather than a guess:
+        #   waiting  blocked on you -- waitingFor says on what
+        #   idle     ready for your next prompt
+        #   busy     mid-turn
+        #   shell    idle, but the terminal is showing a shell rather than the
+        #            prompt (Ctrl-Z, `!`); Claude Code's own UI calls this
+        #            working, and so does this.
+        # An unrecognised or missing status therefore means "hasn't reported
+        # yet", not "urgent" -- ranking it 0 is what made a backgrounded shell
+        # sit at the top of the menu claiming to want input.
         case "$status" in
-            idle)         rank=1 ;;
-            busy|running) rank=2 ;;
-            *)            rank=0 ;;
+            waiting)    rank=0 ;;
+            idle)       rank=1 ;;
+            busy|shell) rank=2 ;;
+            *)          rank=2 ;;
         esac
         [ -n "$name" ] || name=$(basename "$cwd")
         age=$(human_age $(( now - supd / 1000 )))
 
-        printf '%s\n' "$rank$US$status$US$pid$US$name$US$cwd$US$age$US$tmx$US$waiting$US$sid$US$supd$US$job$US$kind"
+        printf '%s\n' "$rank$US$status$US$pid$US$name$US$cwd$US$age$US$tmx$US$waiting$US$sid$US$supd$US$job$US$kind$US$nsrc"
     # Folded (see below), then ordered: rank ascending, and most-recently-changed
     # first within a rank. Sorting on the humanised age would compare "3d"
     # against "49s" as text.
@@ -218,7 +385,7 @@ enumerate() {
                 j = job[i]
                 if (j != "" && kind[i] == "bg" && (j in host)) continue
                 $0 = row[i]
-                $13 = (kind[i] == "bg" || (j != "" && (j in bg))) ? "bg" : ""
+                $14 = (kind[i] == "bg" || (j != "" && (j in bg))) ? "bg" : ""
                 # The status shown is the more urgent of the pair: while you are
                 # parked it is the bg job that is actually working, or actually
                 # blocked on a prompt, and that is the thing worth knowing.
@@ -234,18 +401,38 @@ enumerate() {
 
 # --- focusing --------------------------------------------------------------
 focus() {  # pid, tmux-location
-    if [ -n "$2" ]; then
-        con=$(con_for_tmux "$2") || return 1
-        swaymsg "[con_id=$con] focus" >/dev/null 2>&1 || return 1
-        # "session:@window.%pane" -- select both, so a multi-pane window lands right.
-        rest=${2#*:}; win=${rest%%.*}; pane=${rest#*.}
-        tmux select-window -t "${2%%:*}:$win" >/dev/null 2>&1
-        tmux select-pane   -t "$pane"        >/dev/null 2>&1
-        return 0
-    fi
-    con=$(con_for_ancestry "$1") || return 1
-    swaymsg "[con_id=$con] focus" >/dev/null 2>&1
+    resolve_row "$1" "$2"
+    [ -n "$R_WIN" ] || return 1
+    swaymsg "[con_id=${R_WIN%%"$US"*}] focus" >/dev/null 2>&1 || return 1
+    case "$R_KIND" in
+        tmux)
+            # "session:@window.%pane" -- select both, so a multi-pane window lands right.
+            rest=${2#*:}; win=${rest%%.*}; pane=${rest#*.}
+            tmux select-window -t "${2%%:*}:$win" >/dev/null 2>&1
+            tmux select-pane   -t "$pane"        >/dev/null 2>&1
+            ;;
+        herdr)
+            # Workspace and tab first: those take any pane id, so they land you
+            # in the right place even for a pane herdr never recognised as an
+            # agent. `agent focus` then picks the exact pane inside a split tab.
+            # It reports a bad target in its JSON and still exits 0, so there is
+            # nothing to branch on -- hence all three, best-effort, in that order.
+            pane=${R_PANE%%"$US"*}
+            rest=${R_PANE#*"$US"}; ws=${rest%%"$US"*}
+            rest=${rest#*"$US"};   tab=${rest%%"$US"*}
+            "$HERDR" workspace focus "$ws"   >/dev/null 2>&1
+            "$HERDR" tab       focus "$tab"  >/dev/null 2>&1
+            "$HERDR" agent     focus "$pane" >/dev/null 2>&1
+            ;;
+    esac
+    return 0
 }
+
+# The menu is drawn with pango markup, so everything interpolated into a row has
+# to be escaped: an "&" in a cwd, a session name or a herdr workspace label would
+# otherwise swallow the rest of the line. Escape AFTER padding -- "&amp;" is five
+# columns wide to printf and one to rofi.
+esc() { printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'; }
 
 short_cwd() {
     case "$1" in
@@ -259,18 +446,31 @@ short_cwd() {
 case "${1:-menu}" in
     list)
         printf 'STATUS\tWINDOW\tPID\tNAME\tCWD\tAGE\tCTX\tWHERE\n'
-        enumerate | while IFS=$US read -r rank status pid name cwd age tmx waiting sid supd job kind bgf; do
+        enumerate | while IFS=$US read -r rank status pid name cwd age tmx waiting sid supd job kind nsrc bgf; do
             t=$(transcript_for "$cwd" "$sid")
             ctx=$(context_of "$t") || ctx=""
+            # Resolved HERE, before the label, and not inside the $(...) that
+            # asks for one: a command substitution runs in a subshell, so a
+            # lookup made in there is thrown away, and both the sway tree and
+            # the herdr pane map would be rebuilt for every row. Resolving in
+            # this shell first leaves the answer where the subshell inherits it.
+            resolve_row "$pid" "$tmx"
+            set_display_name "$name" "$nsrc"
             label=$(label_for_row "$pid" "$tmx") || label=""
-            # A tmux session with no client attached resolves to no window, but
-            # saying where it lives is still the useful half of the answer.
-            if w=$(win_for_row "$pid" "$tmx"); then where="con ${w%%"$US"*}${tmx:+ tmux $tmx}"
-            elif [ -n "$tmx" ]; then where="tmux $tmx (detached)"
+            # A tmux or herdr session whose client has gone resolves to no
+            # window, but saying where it lives is still the useful half of the
+            # answer.
+            case "$R_KIND" in
+                tmux)  host="tmux $tmx" ;;
+                herdr) host="herdr ${R_PANE%%"$US"*}" ;;
+                *)     host="" ;;
+            esac
+            if   [ -n "$R_WIN" ]; then where="con ${R_WIN%%"$US"*}${host:+ $host}"
+            elif [ -n "$host" ];  then where="$host (no client attached)"
             else where="-"
             fi
             printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-                "$status${bgf:+/bg}" "${label:--}" "$pid" "$name" \
+                "$status${bgf:+/bg}" "${label:--}" "$pid" "$DISPLAY_NAME" \
                 "$(short_cwd "$cwd")" "$age" \
                 "${ctx:+$(( (ctx + 500) / 1000 ))k}" "$where"
         done
@@ -296,7 +496,7 @@ case "${1:-menu}" in
         cur=' '                                    # leading space: see the lookup below
 
         ready=0 action=0 total=0
-        while IFS=$US read -r rank status pid name cwd age tmx waiting sid supd job kind bgf; do
+        while IFS=$US read -r rank status pid name cwd age tmx waiting sid supd job kind nsrc bgf; do
             [ -n "$pid" ] || continue
             total=$(( total + 1 ))
             [ "$rank" -eq 1 ] && ready=$(( ready + 1 ))
@@ -364,12 +564,15 @@ EOF
         # tree is cached, so this stays one swaymsg call however many rows there
         # are.
         rich=''
-        while IFS=$US read -r rank status pid name cwd age tmx waiting sid supd job kind bgf; do
+        while IFS=$US read -r rank status pid name cwd age tmx waiting sid supd job kind nsrc bgf; do
             [ -n "$pid" ] || continue
+            resolve_row "$pid" "$tmx"   # before the label; see the list branch
+            set_display_name "$name" "$nsrc"
             label=$(label_for_row "$pid" "$tmx") || label=""
+            hst=''; [ "$R_KIND" = herdr ] && hst=herdr
             t=$(transcript_for "$cwd" "$sid")
             ctx=$(context_of "$t") || ctx=""
-            rich="$rich$rank$US$status$US$pid$US$name$US$cwd$US$age$US$tmx$US$waiting$US$bgf$US${label:--}$US$ctx
+            rich="$rich$rank$US$status$US$pid$US$DISPLAY_NAME$US$cwd$US$age$US$tmx$US$waiting$US$bgf$US${label:--}$US$ctx$US$hst
 "
         done <<EOF
 $rows
@@ -379,35 +582,54 @@ EOF
         # -format i returns the chosen INDEX, so nothing has to be parsed back
         # out of a decorated display string.
         # Widths of the two name columns, so they line up (rofi's default font
-        # is "mono 12", so padding with spaces actually aligns). Both labels are
-        # ASCII -- a locked title's two lowercase words, or an app id -- so
-        # awk's byte length is their column width.
-        colw() { printf '%s' "$rich" | cut -d"$US" -f"$1" \
-                 | awk -v d="$2" '{ if (length > m) m = length } END { print (m > 0 ? m : d) }'; }
+        # is "mono 12", so padding with spaces actually aligns).
+        #
+        # Measured with `wc -L`, the DISPLAY width, and padded through padw,
+        # because neither of the obvious tools counts what rofi draws: mawk's
+        # length and printf's %-*s both count bytes, so one "\u2733" or the
+        # "\u2442" Claude Code marks a forked session with left a row two
+        # columns short of the rest.
+        colw() { m=$(printf '%s' "$rich" | cut -d"$US" -f"$1" | wc -L)
+                 [ "$m" -gt 0 ] 2>/dev/null || m=$2
+                 printf '%s\n' "$m"; }
+
+        # Pad to a display width, by asking printf for however many BYTES that
+        # comes to for this particular string.
+        padw() { w=$(printf '%s' "$2" | wc -L); b=$(printf '%s' "$2" | wc -c)
+                 printf '%-*s' "$(( $1 + b - w ))" "$2"; }
         wl=$(colw 10 12)
         wn=$(colw 4 12)
 
         menu='' keys=''
-        while IFS=$US read -r rank status pid name cwd age tmx waiting bgf label ctx; do
+        while IFS=$US read -r rank status pid name cwd age tmx waiting bgf label ctx hst; do
             [ -n "$pid" ] || continue
             case "$rank" in
                 1) mark='<span foreground="#8ec07c">●</span>'; word=ready ;;
-                2) mark='<span foreground="#5c5c5c">◐</span>'; word=working ;;
+                # `shell` shares a rank with `busy` but not a meaning -- nothing
+                # is running, the terminal is just showing a shell rather than
+                # the prompt. Cheap to say, and it explains the dim mark.
+                2) mark='<span foreground="#5c5c5c">◐</span>'
+                   if [ "$status" = shell ]; then word=shell; else word=working; fi ;;
                 *) mark='<span foreground="#d79921">!</span>'; word=$status ;;
             esac
-            extra=$(short_cwd "$cwd")
+            extra=$(esc "$(short_cwd "$cwd")")
             [ -n "$tmx" ] && extra="$extra  <i>tmux</i>"
+            [ -n "$hst" ] && extra="$extra  <i>$hst</i>"
             [ -n "$bgf" ] && extra="$extra  <i>bg</i>"
-            [ -n "$waiting" ] && extra="$extra  <i>$waiting</i>"
+            [ -n "$waiting" ] && extra="$extra  <i>$(esc "$waiting")</i>"
             # Pango markup must wrap the already-padded text: padding inside a
             # tag still counts, but the name has to be padded before it is bolded
             # or the trailing spaces land outside the column.
-            padded=$(printf '%-*s' "$wl" "$label")
-            # The session's own name stays, one column right and dimmed: it is
-            # what `claude` calls itself and what a notification says, so losing
-            # it would break the link between the two.
-            line=$(printf '%s <b>%s</b>  <span foreground="#5c5c5c">%-*s  %-7s %6s %8s  %s</span>' \
-                   "$mark" "$padded" "$wn" "$name" "$word" "$age" \
+            padded=$(esc "$(padw "$wl" "$label")")
+            # The session's name stays, one column right and dimmed: it is what
+            # `claude` calls itself and what a notification says, so losing it
+            # would break the link between the two. The one exception is a
+            # DERIVED name standing in for a herdr pane's title (see
+            # set_display_name) -- there the link was to a token that named
+            # nothing, and the title is what the notification should have said.
+            pname=$(esc "$(padw "$wn" "$name")")
+            line=$(printf '%s <b>%s</b>  <span foreground="#5c5c5c">%s  %-7s %6s %8s  %s</span>' \
+                   "$mark" "$padded" "$pname" "$word" "$age" \
                    "${ctx:+$(( (ctx + 500) / 1000 ))k ctx}" "$extra")
             menu="$menu$line
 "
@@ -426,9 +648,16 @@ EOF
         tmx=$(printf '%s' "$sel" | cut -f2)
         [ -n "$pid" ] || exit 0
 
-        focus "$pid" "$tmx" || notify-send -a claude -u normal -t 4000 \
-            -h string:x-dunst-stack-tag:claude-sessions \
-            'Claude sessions' "No window found for pid $pid${tmx:+ (tmux $tmx, no client attached?)}"
+        if ! focus "$pid" "$tmx"; then
+            case "$R_KIND" in
+                tmux)  why=" (tmux $tmx, no client attached?)" ;;
+                herdr) why=" (herdr ${R_PANE%%"$US"*}, no client attached?)" ;;
+                *)     why="" ;;
+            esac
+            notify-send -a claude -u normal -t 4000 \
+                -h string:x-dunst-stack-tag:claude-sessions \
+                'Claude sessions' "No window found for pid $pid$why"
+        fi
         ;;
 
     *)
