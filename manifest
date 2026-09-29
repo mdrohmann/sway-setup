@@ -31,6 +31,7 @@ bin/clip-sync           .local/bin/clip-sync
 bin/window-identity     .local/bin/window-identity
 bin/keys                .local/bin/keys
 bin/foot-theme          .local/bin/foot-theme
+bin/night-light         .local/bin/night-light
 
 # Not part of the desktop -- nothing binds or execs it. It is the tool that
 # made the screenshot in the README, and it is handy on any sway machine.

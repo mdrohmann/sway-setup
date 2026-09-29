@@ -1,0 +1,22 @@
+#!/bin/sh
+# Record gammastep's period where the waybar module can read it, and poke
+# waybar so the change shows up at once.
+#
+# gammastep runs every executable in this folder on an event. There is only one
+# event, period-changed, but it covers more than it sounds like: disabling
+# gammastep (the tray icon's Enabled box, or $mod+Shift+b) reports a change TO
+# the period "none", and re-enabling reports a change away from it. So "none"
+# here means off, and this file is a true reading of the daemon's state however
+# it was reached -- which is the whole reason the state is taken from gammastep
+# rather than tracked alongside it by whatever sent the signal.
+#
+# Nothing fires when gammastep exits, so a stale file can outlive it. The waybar
+# module checks the process separately for that reason.
+case "$1" in
+    period-changed) printf '%s\n' "$3" > "${XDG_RUNTIME_DIR:-/tmp}/gammastep-period" ;;
+    *)              exit 0 ;;
+esac
+
+# RTMIN+8 is custom/night-light's `signal` in the waybar config. The module also
+# polls, but only slowly -- this is what makes pressing the key feel immediate.
+pkill -RTMIN+8 -x waybar 2>/dev/null || :

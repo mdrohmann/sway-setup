@@ -13,7 +13,8 @@
     "modules-center": [],
     "modules-right": ["custom/pomodoro", "custom/claude", "custom/slack", "custom/gmail",
                       "privacy",
-                      "cpu", "memory", "temperature", "bluetooth", "tray",
+                      "cpu", "memory", "temperature", "bluetooth",
+                      "custom/night-light", "tray",
                       "battery", "clock"],
 
     "sway/workspaces": {
@@ -167,6 +168,27 @@
         "tooltip-format-enumerate-connected": "{device_alias}\t{device_address}",
         "tooltip-format-enumerate-connected-battery": "{device_alias}\t{device_battery_percentage}%",
         "on-click": "foot -e bluetoothctl"
+    },
+
+    "custom/night-light": {
+        // Whether gammastep is armed, which the screen cannot tell you during
+        // the day: an enabled night-light sitting at 6500K looks exactly like
+        // no night-light at all until sunset settles it. Logic and the JSON
+        // contract live in ~/.local/bin/night-light; the nl-* classes it emits
+        // are styled in style.css.
+        //
+        // The state is gammastep's own, reported by its period-changed hook in
+        // ~/.config/gammastep/hooks, so the tray icon's Enabled box and
+        // $mod+Shift+b both show up here.
+        //
+        // signal + a slow interval, rather than a fast poll: the hook sends
+        // RTMIN+8 the moment anything changes, so the only job left for the
+        // interval is noticing a gammastep that died, which announces nothing.
+        "exec": "$HOME/.local/bin/night-light waybar",
+        "return-type": "json",
+        "interval": 30,
+        "signal": 8,
+        "on-click": "$HOME/.local/bin/night-light toggle"
     },
 
     "tray": {

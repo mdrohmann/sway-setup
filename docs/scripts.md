@@ -98,6 +98,31 @@ Session data comes from `~/.claude/sessions/<pid>.json` and the transcript
 `.jsonl`, read backwards with `tac | grep -m1 '"usage"'` so context accounting
 costs one line and not a whole file.
 
+## `night-light` — gammastep, where you can see it
+
+`$mod+Shift+b` toggles gammastep and `custom/night-light` shows whether it is
+armed. The readout exists for the daytime case: gammastep holds 6500K all day,
+which is precisely what the screen looks like with gammastep switched off, so
+until sunset there is nothing to tell the two apart.
+
+The state is gammastep's own rather than a note of what we last told it. Its
+hooks (`~/.config/gammastep/hooks`, linked in with the rest of the config) fire
+on one event, `period-changed`, and that event covers more than its name
+suggests: disabling gammastep reports a change *to* the period `none`, and
+re-enabling reports a change away from it. So the hook writes the period to
+`$XDG_RUNTIME_DIR` and `none` means off — and because the daemon is the one
+reporting, the tray icon's Enabled box and `$mod+Shift+b` both show up, which a
+state file written by whichever one sent the signal would not manage.
+
+Nothing fires when gammastep *exits*, so the file can outlive the process. That
+is the one thing the module checks for itself, and the reason it polls at all:
+`signal: 8` from the hook makes a toggle instant, and the 30s interval is there
+only to notice a death that announced nothing.
+
+Two glyphs rather than two shades: `fa-moon-o` when a night-light is on duty,
+`fa-sun-o` when it is off. Opacity then says how far into the evening it is,
+which is information the screen is already giving you.
+
 ## `foot-theme` — light and dark, on one key
 
 `$mod+Ctrl+b` flips every running foot between Solarized Dark and Light, and
