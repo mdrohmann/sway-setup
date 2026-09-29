@@ -331,6 +331,48 @@ window#waybar {
     color: #d79921;
 }
 
+/* Night-light (U+F186 fa-moon-o, U+F185 fa-sun-o when off). The distinction
+ * that has to survive is armed-but-idle versus off, because during the day the
+ * screen looks the same either way -- so those two get different GLYPHS rather
+ * than two shades of the same one. Opacity then says how far along the evening
+ * is, which is information the screen is already giving you and so needs no
+ * more than a ramp.
+ *
+ * The greys match the rest of the bar: #5c5c5c for inactive, the same amber
+ * #d79921 the other modules use for "this wants your attention". Off is amber
+ * rather than grey because it is a state you chose and probably meant to undo;
+ * a night-light that is merely idle is not worth a colour. */
+#custom-night-light {
+    padding: 0 8px;
+}
+
+/* Switched off -- a sun, not a dim moon, so it cannot be mistaken for daytime. */
+#custom-night-light.nl-off {
+    color: #d79921;
+}
+
+/* Armed, nothing to do yet. Dim, but present: this is the state the bar exists
+ * to make visible. */
+#custom-night-light.nl-day {
+    opacity: 0.45;
+}
+
+/* Warming, partway through dusk. */
+#custom-night-light.nl-transition {
+    opacity: 0.75;
+}
+
+/* Full night temperature. */
+#custom-night-light.nl-night {
+    opacity: 1;
+}
+
+/* gammastep is not running at all, which no hook announces -- the module
+ * notices on its next poll. Inactive grey, as elsewhere. */
+#custom-night-light.nl-gone {
+    color: #5c5c5c;
+}
+
 /* Slack (U+F198 fa-slack). White while running and quiet, like every other
  * always-present module here; the warning amber when something is addressed to
  * you; the inactive grey only when Slack is not running, the same way

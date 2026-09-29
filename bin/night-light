@@ -1,0 +1,59 @@
+#!/bin/sh
+# gammastep's state, for waybar -- and the toggle that changes it.
+#
+# Usage: night-light [waybar|toggle]
+#
+# The point of the readout is the daytime case: gammastep sits at 6500K all day,
+# which is exactly what the screen looks like with gammastep switched off, so
+# there is otherwise no way to tell an armed night-light from an absent one
+# until sunset proves it either way.
+#
+# State is gammastep's own, not a guess: its period-changed hook writes the
+# period to $XDG_RUNTIME_DIR (see config/gammastep/hooks/10-waybar), and a
+# period of "none" is how a disabled gammastep reports itself. Because it comes
+# from the daemon, the tray icon's Enabled box and $mod+Shift+b are both
+# reflected -- the alternative, remembering here what we last told it to do,
+# would be wrong the moment anything else sent the signal.
+#
+# No hook fires when gammastep exits, so the file can outlive the process. That
+# is what the pgrep is for, and why the slow poll in the waybar config matters:
+# a crash shows up within the interval even though nothing announced it.
+
+PERIOD="${XDG_RUNTIME_DIR:-/tmp}/gammastep-period"
+
+case "${1:-waybar}" in
+    toggle)
+        # gammastep toggles its own state on USR1 and the hook reports the
+        # result, so there is nothing to record here. -x because the pattern is
+        # unanchored and gammastep runs under gammastep-indicator.
+        pkill -USR1 -x gammastep
+        ;;
+
+    waybar)
+        period=$(cat "$PERIOD" 2>/dev/null)
+        if ! pgrep -x gammastep >/dev/null 2>&1; then
+            cls=nl-gone;  txt=; tip="Night-light is not running"
+        else
+            case "$period" in
+                # U+F185 fa-sun-o for off, U+F186 fa-moon-o otherwise: the moon
+                # says a night-light is on duty, whether or not it is warming
+                # anything yet, and how far along it is rides on the class.
+                none)        cls=nl-off;        txt=; tip="Night-light off" ;;
+                daytime)     cls=nl-day;        txt=; tip="Night-light on, daytime" ;;
+                night)       cls=nl-night;      txt=; tip="Night-light on, night" ;;
+                transition*) cls=nl-transition; txt=; tip="Night-light on, $period" ;;
+                *)           cls=nl-day;        txt=; tip="Night-light on" ;;
+            esac
+        fi
+        # jq rather than printf: a period string comes from gammastep and a
+        # transition one carries a percentage, so it is not ours to assume is
+        # JSON-safe.
+        jq -cn --arg t "$txt" --arg tip "$tip" --arg c "$cls" \
+           '{text: $t, tooltip: $tip, class: [$c]}'
+        ;;
+
+    *)
+        echo "usage: night-light [waybar|toggle]" >&2
+        exit 1
+        ;;
+esac

@@ -361,11 +361,12 @@ bindsym $mod+r mode "resize"
     # display. If the warm cast arrives at the wrong TIME, neither of these is
     # the fix -- check lat/lon in ~/.config/gammastep/config.ini.
     #
-    # gammastep toggles its own state on USR1, so that binding is the whole
-    # implementation. -x because the pattern is unanchored and gammastep runs
-    # under gammastep-indicator.
+    # gammastep toggles its own state on USR1, so ~/.local/bin/night-light is
+    # barely more than that signal -- what it is really for is the other half,
+    # the waybar readout, because during the day an armed night-light and no
+    # night-light at all look identical. Clicking that module toggles too.
     #: Toggle the night-light (gammastep) on or off
-    bindsym $mod+Shift+b exec pkill -USR1 -x gammastep
+    bindsym $mod+Shift+b exec ~/.local/bin/night-light toggle
     # foot keeps both Solarized palettes loaded and swaps on a signal, but will
     # not say which one it is showing -- so remembering that is all
     # ~/.local/bin/foot-theme does.
