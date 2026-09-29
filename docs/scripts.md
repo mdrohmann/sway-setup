@@ -98,6 +98,25 @@ Session data comes from `~/.claude/sessions/<pid>.json` and the transcript
 `.jsonl`, read backwards with `tac | grep -m1 '"usage"'` so context accounting
 costs one line and not a whole file.
 
+## `foot-theme` — light and dark, on one key
+
+`$mod+Ctrl+b` flips every running foot between Solarized Dark and Light, and
+`$mod+Shift+b` toggles the night-light next to it. The two sit together because
+they get mistaken for each other: gammastep warms the whole display, and against
+a dark terminal that reads as the terminal having changed rather than the screen.
+Neither is the fix if the warm cast arrives at the wrong *time* — that is `lat`
+and `lon` in `~/.config/gammastep/config.ini`.
+
+The night-light needs no script: gammastep toggles its own state on `SIGUSR1`.
+
+foot needs one only because it will not answer a question. It loads both
+`[colors]` and `[colors2]` at startup and swaps on a signal — `USR1` for dark,
+`USR2` for light — but offers no way to ask which one a terminal is showing, so
+there is nothing to toggle against. The state file in `$XDG_RUNTIME_DIR` is that
+answer and nothing more. One file covers every terminal because the signal is
+broadcast; a foot opened afterwards still starts dark, so it disagrees with the
+others until the next toggle brings them back in line.
+
 ## `keys` — the bindings, as a menu
 
 `$mod+slash` lists every binding in the sway config with what it does, and runs
