@@ -1,0 +1,46 @@
+#!/bin/sh
+# Flip every running foot between the two palettes in foot.ini.
+#
+# Usage: foot-theme [toggle|light|dark]
+#
+# foot loads BOTH colour sections at startup and swaps between them on a
+# signal -- USR1 selects [colors] (Solarized Dark, its default), USR2 selects
+# [colors2] (Solarized Light). It never re-reads the file and offers no way to
+# ask which section a terminal is currently showing, so the only thing this
+# script adds is remembering that: without it there is nothing to toggle
+# against.
+#
+# One state file is enough because the signal goes to every foot at once. A
+# terminal opened afterwards still starts on [colors], so it comes up dark
+# while the rest are light -- the next toggle brings them back into agreement.
+#
+# Two caveats inherited from foot, both documented in config/foot/foot.ini:
+# a foot launched before those sections existed ignores the signals entirely,
+# and edits to the palettes only reach terminals started afterwards.
+#
+# State lives in $XDG_RUNTIME_DIR, so it is dropped at logout -- which is the
+# right default, because foot comes back up dark too.
+
+STATE="${XDG_RUNTIME_DIR:-/tmp}/foot-theme"
+
+current() { cat "$STATE" 2>/dev/null || echo dark; }
+
+apply() {
+    case "$1" in
+        light) sig=USR2 ;;
+        dark)  sig=USR1 ;;
+    esac
+    # -x: `foot` as a pattern is unanchored and would also catch a footclient.
+    # A miss is not a failure -- there may simply be no terminal open yet, and
+    # the state still wants recording for the next toggle.
+    pkill -"$sig" -x foot || :
+    tmp="$STATE.$$"
+    printf '%s\n' "$1" > "$tmp" && mv -f "$tmp" "$STATE"
+}
+
+case "${1:-toggle}" in
+    toggle) if [ "$(current)" = light ]; then apply dark; else apply light; fi ;;
+    light)  apply light ;;
+    dark)   apply dark ;;
+    *)      echo "usage: foot-theme [toggle|light|dark]" >&2; exit 1 ;;
+esac

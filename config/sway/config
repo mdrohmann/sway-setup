@@ -355,6 +355,23 @@ bindsym $mod+r mode "resize"
     #: Pause or resume notifications
     bindsym $mod+Ctrl+Shift+n exec dunstctl set-paused toggle
 
+    # How the screen looks, on two keys that sit together because the two get
+    # confused for each other: the night-light warms everything, and on a dark
+    # terminal that reads as the terminal having changed rather than the
+    # display. If the warm cast arrives at the wrong TIME, neither of these is
+    # the fix -- check lat/lon in ~/.config/gammastep/config.ini.
+    #
+    # gammastep toggles its own state on USR1, so that binding is the whole
+    # implementation. -x because the pattern is unanchored and gammastep runs
+    # under gammastep-indicator.
+    #: Toggle the night-light (gammastep) on or off
+    bindsym $mod+Shift+b exec pkill -USR1 -x gammastep
+    # foot keeps both Solarized palettes loaded and swaps on a signal, but will
+    # not say which one it is showing -- so remembering that is all
+    # ~/.local/bin/foot-theme does.
+    #: Toggle the terminal between Solarized Light and Dark
+    bindsym $mod+Ctrl+b exec ~/.local/bin/foot-theme toggle
+
     # Special keys to adjust brightness via brightnessctl, with a dunst OSD
     # (same script shape as $volume, so both feedbacks match).
     bindsym --locked XF86MonBrightnessDown exec $brightness down

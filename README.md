@@ -32,6 +32,7 @@ so you read it out of the corner of your eye instead of parsing a countdown.
 | [`webapp`](bin/webapp) / [`slack`](bin/slack) | `$mod+c`, `$mod+m` | Slack and Gmail as Chrome app windows pinned to named workspaces, with unread counts scraped from the window title. |
 | [`pomodoro`](bin/pomodoro) | `$mod+t` | A tomato in the bar that ripens 🌱 → 🌿 → 🍅 as the session runs, then blinks. |
 | [`lock-session`](bin/lock-session) | `$mod+Ctrl+l` | Wraps hyprlock. Nineteen lines, two of which are bug fixes — see below. |
+| [`foot-theme`](bin/foot-theme) | `$mod+Ctrl+b` | Flips every running foot between Solarized Light and Dark. foot keeps both palettes loaded and swaps on a signal; this remembers which one is showing. |
 | [`volume`](bin/volume) / [`brightness`](bin/brightness) | media keys | Matching dunst OSDs, `--locked` so they work on the lock screen, `Shift` for 1% steps. |
 | [`clip-sync`](bin/clip-sync) | (runs at start) | Keeps PRIMARY and CLIPBOARD in sync, so it stops mattering which one you used. |
 | [`window-identity`](bin/window-identity) | `$mod+Shift+i` | Shows the focused window's `app_id` and `class`, for writing `for_window` rules. |
