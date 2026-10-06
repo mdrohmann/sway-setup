@@ -1,104 +1,189 @@
-#!/bin/sh
-# List running Claude Code sessions and jump to the terminal hosting one.
-#
-# Usage: claude-sessions [list|menu|waybar]
-#
-# Claude Code maintains ~/.claude/sessions/<PID>.json for every live session,
-# carrying its name, cwd, sessionId and -- the useful part -- a `status` saying
-# whether it is mid-turn or waiting for you. That file is the whole data source
-# here; `ListAgents` inside a session reads the same thing, so the two agree.
-#
-# Which window a session lives in is decided by process ancestry alone, never by
-# matching titles -- that works whatever a window happens to be called. Titles
-# are read only afterwards, to LABEL the row you are about to pick; see
-# window_label for why only a locked title is trusted.
-#
-# Two hosts break that ancestry, and break it the same way: under tmux and under
-# herdr a session's parents run up into a DETACHED server, never into a window.
-# Both are handled by resolving the window of the CLIENT instead, and then
-# steering the host to the right pane once sway has focused it.
+#!/usr/bin/env python3
+"""List running Claude Code sessions and jump to the terminal hosting one.
 
-# Fields are separated by US (0x1f), never by tab: tab counts as IFS whitespace,
-# so `read` collapses runs of it and an empty field (no tmux, no waitingFor)
-# silently shifts every later column left by one.
-US=$(printf '\037')
+Usage: claude-sessions [list|menu|waybar]
+
+Claude Code maintains ~/.claude/sessions/<PID>.json for every live session,
+carrying its name, cwd, sessionId and -- the useful part -- a `status` saying
+whether it is mid-turn or waiting for you. That file is the whole data source
+here; `ListAgents` inside a session reads the same thing, so the two agree.
+
+Which window a session lives in is decided by process ancestry alone, never by
+matching titles -- that works whatever a window happens to be called. Titles
+are read only afterwards, to LABEL the row you are about to pick; see
+window_label for why only a locked title is trusted.
+
+Two hosts break that ancestry, and break it the same way: under tmux and under
+herdr a session's parents run up into a DETACHED server, never into a window.
+Both are handled by resolving the window of the CLIENT instead, and then
+steering the host to the right pane once sway has focused it.
+
+This is the one script here that is not POSIX sh. It was, and nearly every bug
+it had was the shell's rather than the logic's: a cache filled inside $(...)
+is thrown away with the subshell, which fetched the sway tree once per ancestor
+of every row; records had to travel as US-joined text because `read` collapses
+empty tab fields; and printf pads by bytes, not by what rofi draws. Here those
+are a dict, a dataclass and unicodedata. Standard library only.
+"""
+
+import glob
+import json
+import mmap
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+import unicodedata
+from dataclasses import dataclass, field
+
+HOME = os.path.expanduser("~")
+SESSIONS = os.path.join(HOME, ".claude", "sessions")
+PROJECTS = os.path.join(HOME, ".claude", "projects")
 
 # Last poll's rank per pid, for the ready-transition notification.
-SEEN="${XDG_RUNTIME_DIR:-/tmp}/claude-sessions.seen"
+SEEN = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/tmp", "claude-sessions.seen")
 
-SESSIONS="$HOME/.claude/sessions"
-PROJECTS="$HOME/.claude/projects"
+HERDR = shutil.which("herdr") or os.path.join(HOME, ".local", "bin", "herdr")
+
+# Bounds every walk up the process tree, so a cycle or a /proc race cannot spin
+# forever.
+MAX_DEPTH = 40
+
+
+def run(*argv):
+    """stdout of a command, or "" if it is missing or fails -- every external
+    tool here is best-effort, and a missing one should cost a column, not the
+    menu."""
+    try:
+        return subprocess.run(argv, capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def notify(urgency, summary, body, tag, timeout=None):
+    argv = ["notify-send", "-a", "claude", "-u", urgency,
+            "-h", f"string:x-dunst-stack-tag:{tag}"]
+    if timeout is not None:
+        argv += ["-t", str(timeout)]
+    run(*argv, summary, body)
+
 
 # --- /proc helpers ---------------------------------------------------------
-# Neither of these may split /proc/<pid>/stat on whitespace: `comm` is
+# /proc/<pid>/stat may not be split on whitespace from the start: `comm` is
 # parenthesised and can itself contain spaces ("tmux: server"), which silently
 # yields a garbage PPID. Parents come from status; starttime is read only after
 # discarding everything through the LAST ")".
-ppid_of() { awk '/^PPid:/{print $2; exit}' "/proc/$1/status" 2>/dev/null; }
+def ppid_of(pid):
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                if line.startswith("PPid:"):
+                    return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
 
-starttime_of() {
-    sed 's/.*) //' "/proc/$1/stat" 2>/dev/null | awk '{print $20}'
-}
+
+def starttime_of(pid):
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            stat = f.read()
+        # Fields after comm start at `state` (field 3), so starttime (22) is
+        # the 20th of them.
+        return stat[stat.rindex(")") + 2:].split()[19]
+    except (OSError, ValueError, IndexError):
+        return None
+
 
 # Alive, and the same process that wrote the file -- PIDs get reused, and a
 # crashed session can leave its json behind. Claude Code itself gates on this.
-is_live() {
-    [ -n "$2" ] || return 1
-    [ "$(starttime_of "$1")" = "$2" ]
-}
+def is_live(pid, proc_start):
+    return bool(proc_start) and starttime_of(pid) == proc_start
+
+
+def ancestry(pid):
+    """pid, its parent, and so on up to (not including) init."""
+    for _ in range(MAX_DEPTH):
+        if pid is None or pid <= 1:
+            return
+        yield pid
+        pid = ppid_of(pid)
+
+
+def all_pids():
+    return sorted(int(d) for d in os.listdir("/proc") if d.isdigit())
+
 
 # --- sway ------------------------------------------------------------------
 # Fetched at most once per run, and only when something actually needs a window:
 # the waybar path polls every few seconds and never resolves one, so querying the
-# tree up front would be the most expensive thing it did. Keyed pid -> record.
-# The con_id is the part that identifies a window -- .pid is not unique, one app
-# can own several windows -- and app_id and title ride along because the menu
-# labels each row with the window you will land in, not just its id.
-WINDOWS= WINDOWS_LOADED=
-load_windows() {
-    [ -n "$WINDOWS_LOADED" ] && return
-    WINDOWS_LOADED=1
-    WINDOWS=$(swaymsg -t get_tree 2>/dev/null \
-              | jq -r --arg us "$US" 'recurse(.nodes[]?, .floating_nodes[]?)
-                       | select(.pid != null and (.app_id != null or .window_properties != null))
-                       | [(.pid|tostring), (.id|tostring),
-                          (.app_id // .window_properties.class // ""), (.name // "")]
-                       | join($us)' 2>/dev/null)
-}
+# tree up front would be the most expensive thing it did.
+#
+# pid -> (con_id, app_id, title). The con_id is the part that identifies a
+# window -- .pid is not unique, one app can own several windows, and the first
+# found wins -- and app_id and title ride along because the menu labels each row
+# with the window you will land in, not just its id.
+_windows = None
 
-# pid -> "con_id<US>app_id<US>title". US again rather than tab, and for the same
-# reason as above: a window with an empty app_id must not shift its title left.
-win_for_pid() {
-    load_windows
-    printf '%s\n' "$WINDOWS" | awk -F"$US" -v p="$1" '$1==p{print $2 FS $3 FS $4; exit}'
-}
 
-# Walk up until a parent owns a window. Bounded, so a cycle or a /proc race
-# cannot spin forever.
-win_for_ancestry() {
-    p=$1 n=0
-    while [ -n "$p" ] && [ "$p" -gt 1 ] 2>/dev/null && [ "$n" -lt 40 ]; do
-        w=$(win_for_pid "$p")
-        [ -n "$w" ] && { printf '%s\n' "$w"; return 0; }
-        p=$(ppid_of "$p"); n=$((n + 1))
-    done
-    return 1
-}
+def windows():
+    global _windows
+    if _windows is not None:
+        return _windows
+    _windows = {}
+    try:
+        tree = json.loads(run("swaymsg", "-t", "get_tree") or "null")
+    except ValueError:
+        tree = None
+    stack = [tree] if tree else []
+    while stack:
+        n = stack.pop()
+        stack.extend(reversed(n.get("floating_nodes") or []))
+        stack.extend(reversed(n.get("nodes") or []))
+        if n.get("pid") is None:
+            continue
+        if n.get("app_id") is None and n.get("window_properties") is None:
+            continue
+        app = n.get("app_id") or (n.get("window_properties") or {}).get("class") or ""
+        _windows.setdefault(n["pid"], (n["id"], app, n.get("name") or ""))
+    return _windows
+
+
+# Walk up until a parent owns a window.
+def win_for_ancestry(pid):
+    w = windows()
+    for p in ancestry(pid):
+        if p in w:
+            return w[p]
+    return None
+
 
 # A tmux pane's ancestry ends at the detached tmux server, not at a window. The
 # window we want is whichever terminal has a CLIENT attached to that session, so
 # go via the client's controlling tty.
-win_for_tmux() {
-    sess=${1%%:*}
-    tty=$(tmux list-clients -F '#{client_tty} #{client_session}' 2>/dev/null \
-          | awk -v s="$sess" '$2==s{print $1; exit}')
-    [ -n "$tty" ] || return 1
-    for d in /proc/[0-9]*; do
-        [ "$(readlink "$d/fd/0" 2>/dev/null)" = "$tty" ] || continue
-        win_for_ancestry "${d#/proc/}" && return 0
-    done
-    return 1
-}
+def win_for_tmux(loc):
+    sess = loc.split(":", 1)[0]
+    tty = None
+    for line in run("tmux", "list-clients", "-F", "#{client_tty} #{client_session}").splitlines():
+        parts = line.split(" ", 1)
+        if len(parts) == 2 and parts[1] == sess:
+            tty = parts[0]
+            break
+    if not tty:
+        return None
+    for pid in all_pids():
+        try:
+            if os.readlink(f"/proc/{pid}/fd/0") != tty:
+                continue
+        except OSError:
+            continue
+        w = win_for_ancestry(pid)
+        if w:
+            return w
+    return None
+
 
 # --- herdr -----------------------------------------------------------------
 # herdr multiplexes terminals the way tmux does, so a session started in one of
@@ -109,76 +194,98 @@ win_for_tmux() {
 #
 # The pane map is built from the socket API, and lazily: nothing here runs until
 # a row has failed to resolve through plain ancestry, so the waybar path (which
-# never resolves a window) and every foot-hosted row pay nothing. Calls are
-# ~5ms each and there are only a handful of panes.
+# never resolves a window) and every foot-hosted row pay nothing.
 #
 # One session's worth of panes: `herdr` talks to the default socket, so panes
 # belonging to another named `herdr --session` are not seen here.
-HERDR=$(command -v herdr 2>/dev/null) || HERDR="$HOME/.local/bin/herdr"
+@dataclass
+class Pane:
+    pane_id: str
+    ws_id: str
+    tab_id: str
+    # The workspace LABEL rides along because that -- not the terminal window,
+    # which every pane shares -- is what a herdr row is labelled with.
+    ws_label: str
+    # The pane's title, and only when Claude Code wrote it: Claude Code prefixes
+    # its terminal title with a marker (a spinner while it works, a static one
+    # otherwise), which herdr keeps in terminal_title and removes from
+    # terminal_title_stripped. That prefix is the whole test -- without it the
+    # title is the shell's idea of one ("martin@host: ~/ion"), which says
+    # nothing a row does not already show. Same reasoning as window_label: a
+    # title is worth reading only while something is holding it steady.
+    title: str
 
-# pid -> "pane_id<US>ws_id<US>tab_id<US>ws_label<US>title", one line per pid in
-# a pane: its shell, and whatever is in the foreground. The workspace LABEL rides
-# along because that -- not the terminal window, which every pane shares -- is
-# what a herdr row is labelled with.
-#
-# The title is the pane's, and only when Claude Code wrote it: Claude Code
-# prefixes its terminal title with a marker (a spinner while it works, a static
-# one otherwise), which herdr keeps in terminal_title and removes from
-# terminal_title_stripped. That prefix is the whole test -- without it the title
-# is the shell's idea of one ("martin@host: ~/ion"), which says nothing a row
-# does not already show. Same reasoning as window_label: a title is worth
-# reading only while something is holding it steady.
-HERDR_PANES= HERDR_LOADED=
-load_herdr() {
-    [ -n "$HERDR_LOADED" ] && return
-    HERDR_LOADED=1
-    [ -x "$HERDR" ] || return
-    # Which pane a pid sits in needs a process-info call PER pane, but the map is
-    # then built by a single jq over all of them at once: jq's startup dominates
-    # this, and every record names the pane it belongs to, so one stream of
-    # replies carries enough to join panes, workspaces and pids without a jq (or
-    # an awk) per pane. A reply for a pane that has since closed carries an
-    # "error" instead of a process_info and drops out on its own.
-    ids=$("$HERDR" pane list 2>/dev/null | jq -r '.result.panes[]?.pane_id' 2>/dev/null)
-    [ -n "$ids" ] || return
-    HERDR_PANES=$({
-        "$HERDR" pane list
-        "$HERDR" workspace list
-        for i in $ids; do "$HERDR" pane process-info --pane "$i"; done
-    } 2>/dev/null | jq -n -r --arg us "$US" '
-        [inputs] as $in
-        | ($in | map(.result.workspaces? // empty) | add // []
-           | map({key: .workspace_id, value: (.label // "")}) | from_entries) as $lab
-        | ($in | map(.result.panes? // empty) | add // []
-           | map({key: .pane_id, value: .}) | from_entries) as $pane
-        | $in | map(.result.process_info? // empty) | .[]
-        | . as $pi
-        | ($pane[$pi.pane_id] // {}) as $p
-        | ($lab[$p.workspace_id] // "") as $l
-        | (($p.terminal_title // "") | test("^[\u2733\u25d0\u25d1] ")) as $own
-        | [$pi.shell_pid, ($pi.foreground_processes[]?.pid)] | map(select(. != null)) | .[]
-        | [(.|tostring), $pi.pane_id, ($p.workspace_id // ""), ($p.tab_id // ""),
-           (if $l == "" then ($p.workspace_id // "") else $l end),
-           (if $own then (($p.terminal_title_stripped // "")
-                          | if length > 40 then .[0:39] + "\u2026" else . end)
-                     else "" end)]
-        | join($us)' 2>/dev/null)
-}
 
-# Walk up until a parent is a process herdr knows about. Same shape and same
-# bound as win_for_ancestry.
-herdr_for_ancestry() {
-    load_herdr
-    [ -n "$HERDR_PANES" ] || return 1
-    p=$1 n=0
-    while [ -n "$p" ] && [ "$p" -gt 1 ] 2>/dev/null && [ "$n" -lt 40 ]; do
-        r=$(printf '%s\n' "$HERDR_PANES" \
-            | awk -F"$US" -v q="$p" '$1==q{print $2 FS $3 FS $4 FS $5 FS $6; exit}')
-        [ -n "$r" ] && { printf '%s\n' "$r"; return 0; }
-        p=$(ppid_of "$p"); n=$((n + 1))
-    done
-    return 1
-}
+CLAUDE_TITLE = re.compile("^[✳◐◑] ")
+
+
+def herdr_json(*args):
+    try:
+        return json.loads(run(HERDR, *args) or "null") or {}
+    except ValueError:
+        return {}
+
+
+# pid -> Pane, one entry per pid in a pane: its shell, and whatever is in the
+# foreground.
+_herdr_panes = None
+
+
+def herdr_panes():
+    global _herdr_panes
+    if _herdr_panes is not None:
+        return _herdr_panes
+    _herdr_panes = {}
+    if not os.access(HERDR, os.X_OK):
+        return _herdr_panes
+    panes = (herdr_json("pane", "list").get("result") or {}).get("panes") or []
+    if not panes:
+        return _herdr_panes
+    labels = {w.get("workspace_id"): w.get("label") or ""
+              for w in (herdr_json("workspace", "list").get("result") or {}).get("workspaces") or []}
+    # Which pid sits in which pane needs a process-info call PER pane. They are
+    # started all at once and collected after, so the cost is one round trip,
+    # not one per pane. A pane that has since closed answers with an "error"
+    # instead of a process_info, and drops out on its own.
+    procs = []
+    for p in panes:
+        try:
+            procs.append((p, subprocess.Popen(
+                [HERDR, "pane", "process-info", "--pane", p["pane_id"]],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)))
+        except OSError:
+            pass
+    for p, proc in procs:
+        try:
+            out, _ = proc.communicate(timeout=5)
+            info = ((json.loads(out or "null") or {}).get("result") or {}).get("process_info")
+        except (ValueError, AttributeError, subprocess.SubprocessError):
+            proc.kill()
+            continue
+        if not info:
+            continue
+        ws = p.get("workspace_id") or ""
+        title = ""
+        if CLAUDE_TITLE.match(p.get("terminal_title") or ""):
+            title = truncate(p.get("terminal_title_stripped") or "")
+        pane = Pane(p["pane_id"], ws, p.get("tab_id") or "", labels.get(ws) or ws, title)
+        pids = [info.get("shell_pid")] + [f.get("pid") for f in info.get("foreground_processes") or []]
+        for pid in pids:
+            if pid is not None:
+                _herdr_panes.setdefault(pid, pane)
+    return _herdr_panes
+
+
+# Walk up until a parent is a process herdr knows about.
+def herdr_for_ancestry(pid):
+    panes = herdr_panes()
+    if not panes:
+        return None
+    for p in ancestry(pid):
+        if p in panes:
+            return panes[p]
+    return None
+
 
 # The window every herdr pane is seen through: the terminal a herdr CLIENT is
 # attached in. Found by comm rather than by walking clients like tmux does,
@@ -186,22 +293,30 @@ herdr_for_ancestry() {
 # The server is skipped by its argv -- it is detached, so it would fail to
 # resolve anyway, but a `herdr server` someone started in a foreground terminal
 # would otherwise hand back that terminal.
-HERDR_WIN= HERDR_WIN_LOADED=
-herdr_client_win() {
-    if [ -z "$HERDR_WIN_LOADED" ]; then
-        HERDR_WIN_LOADED=1
-        for f in $(grep -lsx herdr /proc/[0-9]*/comm 2>/dev/null); do
-            c=${f#/proc/}; c=${c%/comm}
-            case "$(tr '\0' ' ' < "/proc/$c/cmdline" 2>/dev/null)" in
-                *' server '*) continue ;;
-            esac
-            HERDR_WIN=$(win_for_ancestry "$c") && break
-            HERDR_WIN=
-        done
-    fi
-    [ -n "$HERDR_WIN" ] || return 1
-    printf '%s\n' "$HERDR_WIN"
-}
+_herdr_win = False      # False: not looked for yet. None: looked, not found.
+
+
+def herdr_client_win():
+    global _herdr_win
+    if _herdr_win is not False:
+        return _herdr_win
+    _herdr_win = None
+    for pid in all_pids():
+        try:
+            with open(f"/proc/{pid}/comm") as f:
+                if f.read().strip() != "herdr":
+                    continue
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                argv = f.read().split(b"\0")
+        except OSError:
+            continue
+        if b"server" in argv[1:]:
+            continue
+        _herdr_win = win_for_ancestry(pid)
+        if _herdr_win:
+            break
+    return _herdr_win
+
 
 # The label for a row: the name of the window it will focus.
 #
@@ -216,452 +331,487 @@ herdr_client_win() {
 # at least says what kind of window to expect. A drifting title would otherwise
 # be worse than no label at all: it reads as an identity while naming whatever
 # happened to be in the foreground when the tree was fetched.
-window_label() {  # app_id, title -> label (empty if neither is usable)
-    head=${2%% - *}
-    case "$head" in
-        *[!a-z\ ]*|*\ *\ *|\ *|*\ ) ;;             # not two plain lowercase words
-        ?*\ ?*) printf '%s\n' "$head"; return 0 ;;
-    esac
-    printf '%s' "${1##*.}" | tr '[:upper:]' '[:lower:]'  # dev.zed.Zed -> zed
-    printf '\n'
-}
+LOCKED_TITLE = re.compile(r"[a-z]+ [a-z]+")
 
-# Where a row lives, resolved once and left in globals, because each row is
-# resolved up to three times -- for its label, for the WHERE column, and again
-# when you pick it.
-#
-#   R_KIND  win | tmux | herdr | "" (nothing found)
-#   R_WIN   the sway window, "con_id<US>app_id<US>title", empty if none
-#   R_PANE  the herdr pane, "pane_id<US>ws_id<US>tab_id<US>ws_label<US>title"
-#
-# Order matters: plain ancestry is tried first because it is free, and it is
-# also what keeps the herdr socket out of the picture for every row that does
-# not need it.
-R_FOR= R_KIND= R_WIN= R_PANE=
-resolve_row() {  # pid, tmux-location
-    [ "$R_FOR" = "$1" ] && return 0
-    R_FOR=$1 R_KIND= R_WIN= R_PANE=
-    if [ -n "$2" ]; then
-        R_KIND=tmux
-        R_WIN=$(win_for_tmux "$2") || R_WIN=
-        return 0
-    fi
-    if R_WIN=$(win_for_ancestry "$1"); then R_KIND=win; return 0; fi
-    R_WIN=
-    if R_PANE=$(herdr_for_ancestry "$1"); then
-        R_KIND=herdr
-        R_WIN=$(herdr_client_win) || R_WIN=
-        return 0
-    fi
-    R_PANE=
-    return 0
-}
 
-# The name a row is shown under. A session names itself, and when it has really
-# done so -- a name you typed, one it chose out of the conversation, one a hook
-# set -- that name wins. What it falls back to otherwise is "derived": the
-# directory plus a couple of hash characters, which tells two sessions in one
-# repo apart and nothing else.
-#
-# A herdr pane can do better for exactly those rows, because Claude Code has
-# already written the conversation's own title into the pane. Borrowing it only
-# where the name is derived keeps the rule one-way: a name the session or you
-# chose is never overwritten by a title that trails it by a turn.
-set_display_name() {  # name, nameSource -> DISPLAY_NAME (reads resolve_row's globals)
-    DISPLAY_NAME=$1
-    case "$2" in derived|'') ;; *) return 0 ;; esac
-    [ "$R_KIND" = herdr ] || return 0
-    t=${R_PANE##*"$US"}
-    [ -n "$t" ] && DISPLAY_NAME=$t
-    return 0
-}
+def window_label(app_id, title):
+    head = title.split(" - ", 1)[0]
+    if LOCKED_TITLE.fullmatch(head):
+        return head
+    return app_id.rsplit(".", 1)[-1].lower()           # dev.zed.Zed -> zed
 
-label_for_row() {  # pid, tmux-location
-    resolve_row "$1" "$2"
-    # A herdr row is labelled with the WORKSPACE it sits in, not with the window:
-    # every pane is seen through the one terminal the client runs in, so its
-    # locked title would label every herdr row identically. The workspace label
-    # is also the name you gave it, which is the point of the column.
-    if [ "$R_KIND" = herdr ]; then
-        rest=${R_PANE#*"$US"}; rest=${rest#*"$US"}; rest=${rest#*"$US"}
-        printf '%s\n' "${rest%%"$US"*}"
-        return 0
-    fi
-    [ -n "$R_WIN" ] || return 1
-    rest=${R_WIN#*"$US"}
-    window_label "${rest%%"$US"*}" "${rest#*"$US"}"
-}
+
+# --- sessions --------------------------------------------------------------
+@dataclass
+class Session:
+    rank: int
+    status: str
+    pid: int
+    name: str
+    name_source: str
+    cwd: str
+    supd: int           # statusUpdatedAt, ms
+    tmux: str
+    waiting: str
+    sid: str
+    job: str
+    kind: str
+    bg: bool = False
+    # Where it lives, filled by resolve():
+    #   host  win | tmux | herdr | "" (nothing found)
+    #   win   the sway window, (con_id, app_id, title), or None
+    #   pane  the herdr Pane, or None
+    host: str = ""
+    win: tuple = None
+    pane: Pane = None
+    _resolved: bool = field(default=False, repr=False)
+
+    def resolve(self):
+        # Order matters: plain ancestry is tried first because it is free, and
+        # it is also what keeps the herdr socket out of the picture for every
+        # row that does not need it.
+        if self._resolved:
+            return
+        self._resolved = True
+        if self.tmux:
+            self.host, self.win = "tmux", win_for_tmux(self.tmux)
+            return
+        self.win = win_for_ancestry(self.pid)
+        if self.win:
+            self.host = "win"
+            return
+        self.pane = herdr_for_ancestry(self.pid)
+        if self.pane:
+            self.host, self.win = "herdr", herdr_client_win()
+
+    def label(self):
+        self.resolve()
+        # A herdr row is labelled with the WORKSPACE it sits in, not with the
+        # window: every pane is seen through the one terminal the client runs
+        # in, so its locked title would label every herdr row identically. The
+        # workspace label is also the name you gave it, which is the point of
+        # the column.
+        if self.host == "herdr":
+            return self.pane.ws_label
+        if not self.win:
+            return ""
+        return window_label(self.win[1], self.win[2])
+
+    def transcript(self):
+        return transcript_for(self.cwd, self.sid)
+
+    # The name a row is shown under. A session names itself, and when it has
+    # really done so -- a name you typed, one it chose out of the conversation,
+    # one a hook set -- that name wins. What it falls back to otherwise is
+    # "derived": the directory plus a couple of hash characters, which tells two
+    # sessions in one repo apart and nothing else.
+    #
+    # For exactly those rows there is something better: the conversation's own
+    # title, the one /resume lists it under. A herdr pane carries it live,
+    # because Claude Code writes it into the terminal title; every other row
+    # reads it from the transcript (see title_of). Borrowing it only where the
+    # name is derived keeps the rule one-way: a name the session or you chose is
+    # never overwritten by a title that trails it by a turn.
+    #
+    # resolve_host=False is for the waybar path, which must not touch sway or
+    # herdr.
+    def display_name(self, resolve_host=True):
+        if self.name_source not in ("derived", ""):
+            return self.name
+        if resolve_host:
+            self.resolve()
+            if self.pane and self.pane.title:
+                return self.pane.title
+        return title_of(self.transcript()) or self.name
+
+
+# Claude Code writes exactly four statuses and drops anything else, so this is
+# the whole vocabulary rather than a guess:
+#   waiting  blocked on you -- waitingFor says on what
+#   idle     ready for your next prompt
+#   busy     mid-turn
+#   shell    idle, but the terminal is showing a shell rather than the prompt
+#            (Ctrl-Z, `!`); Claude Code's own UI calls this working, and so
+#            does this.
+# An unrecognised or missing status therefore means "hasn't reported yet", not
+# "urgent" -- ranking it 0 is what made a backgrounded shell sit at the top of
+# the menu claiming to want input. Blocked sorts first because a session on a
+# permission prompt wants you more urgently than one that merely finished.
+RANK = {"waiting": 0, "idle": 1, "busy": 2, "shell": 2}
+
+
+def enumerate_sessions():
+    rows = []
+    for path in glob.glob(os.path.join(SESSIONS, "*.json")):
+        # The pid lives in the file's name, not in the record.
+        stem = os.path.basename(path)[:-len(".json")]
+        if not stem.isdigit():
+            continue
+        pid = int(stem)
+        try:
+            with open(path) as f:
+                d = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(d, dict) or not is_live(pid, d.get("procStart") or ""):
+            continue
+        status = d.get("status") or "?"
+        cwd = d.get("cwd") or ""
+        rows.append(Session(
+            rank=RANK.get(status, 2), status=status, pid=pid,
+            name=d.get("name") or os.path.basename(cwd),
+            name_source=d.get("nameSource") or "", cwd=cwd,
+            supd=int(d.get("statusUpdatedAt") or d.get("startedAt") or 0),
+            tmux=d.get("tmux") or "",
+            waiting=d.get("waitingFor") or d.get("detail") or "",
+            sid=d.get("sessionId") or "",
+            job=d.get("jobId") or d.get("parkedJobId") or "",
+            kind=d.get("kind") or ""))
+
+    # Park a session and Claude Code keeps TWO records: the interactive one, now
+    # holding a parkedJobId, and a kind=bg one carrying the same id as its jobId.
+    # They are one piece of work, they share a name, and the bg record owns no
+    # window of its own -- so listing both gave two identical-looking rows, one
+    # of which focused nothing. Fold the bg row into its host and flag the host
+    # as carrying background work.
+    bg = {r.job: r for r in rows if r.job and r.kind == "bg"}
+    hosts = {r.job for r in rows if r.job and r.kind != "bg"}
+    out = []
+    for r in rows:
+        if r.kind == "bg" and r.job in hosts:
+            continue
+        r.bg = r.kind == "bg" or r.job in bg
+        # The status shown is the more urgent of the pair: while you are parked
+        # it is the bg job that is actually working, or actually blocked on a
+        # prompt, and that is the thing worth knowing.
+        b = bg.get(r.job) if r.kind != "bg" else None
+        if b and b.rank < r.rank:
+            r.rank, r.status, r.waiting = b.rank, b.status, b.waiting
+        out.append(r)
+
+    # Rank ascending, and most-recently-changed first within a rank.
+    out.sort(key=lambda r: (r.rank, -r.supd))
+    return out
+
 
 # --- transcript ------------------------------------------------------------
-transcript_for() {  # cwd, sessionId
-    d=$(printf '%s' "$1" | sed 's|/|-|g')
-    t="$PROJECTS/$d/$2.jsonl"
-    [ -r "$t" ] && { printf '%s\n' "$t"; return 0; }
+def transcript_for(cwd, sid):
+    if not sid:
+        return None
+    t = os.path.join(PROJECTS, cwd.replace("/", "-"), sid + ".jsonl")
+    if os.access(t, os.R_OK):
+        return t
     # The "/" -> "-" mangling is an assumption about characters that happen not
     # to appear in these paths; fall back to locating the file by session id.
-    find "$PROJECTS" -maxdepth 2 -name "$2.jsonl" 2>/dev/null | head -1
-}
+    found = glob.glob(os.path.join(PROJECTS, "*", sid + ".jsonl"))
+    return found[0] if found else None
+
+
+def last_records(path, *needles):
+    """Parsed transcript lines containing any of needles, last first.
+
+    Transcripts reach tens of MB and only the tail matters, so this searches
+    backwards through an mmap and parses only the lines that match: the cost
+    is however far back the answer is, not the size of the file."""
+    try:
+        with open(path, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
+            end = len(m)
+            while end > 0:
+                hit = max(m.rfind(n, 0, end) for n in needles)
+                if hit < 0:
+                    return
+                start = m.rfind(b"\n", 0, hit) + 1
+                stop = m.find(b"\n", hit)
+                try:
+                    yield json.loads(m[start:stop if stop >= 0 else len(m)])
+                except ValueError:
+                    pass
+                end = start
+    except (OSError, ValueError, TypeError):
+        return                                  # unreadable, or empty (mmap refuses)
+
 
 # Context window in use = the last message's input + both cache figures.
-# Read backwards: transcripts reach several MB, and a full jq pass over one
-# costs ~3x this and grows with the file, while this stays O(tail).
-context_of() {
-    [ -s "$1" ] || return 1
-    tac "$1" 2>/dev/null | grep -m1 '"usage"' \
-        | jq -r '.message.usage
-                 | (.input_tokens // 0) + (.cache_read_input_tokens // 0)
-                   + (.cache_creation_input_tokens // 0)' 2>/dev/null
-}
+def context_of(path):
+    if not path:
+        return None
+    for rec in last_records(path, b'"usage"'):
+        u = (rec.get("message") or {}).get("usage") if isinstance(rec, dict) else None
+        if isinstance(u, dict):
+            return ((u.get("input_tokens") or 0) + (u.get("cache_read_input_tokens") or 0)
+                    + (u.get("cache_creation_input_tokens") or 0))
+    return None
 
-human_age() {  # seconds -> compact
-    s=$1
-    if   [ "$s" -lt 60 ]    ; then printf '%ds' "$s"
-    elif [ "$s" -lt 3600 ]  ; then printf '%dm' $(( s / 60 ))
-    elif [ "$s" -lt 86400 ] ; then printf '%dh' $(( s / 3600 ))
-    else                           printf '%dd' $(( s / 86400 ))
-    fi
-}
 
-# --- enumeration -----------------------------------------------------------
-# Emits, US-separated:
-#   rank status pid name cwd age tmux waiting sid supd job kind namesource bg
-# rank orders the menu: blocked first (a session sitting on a permission prompt
-# wants you more urgently than one that merely finished), then ready, then
-# working.
-enumerate() {
-    now=$(date +%s)
-    # One jq for every session file rather than one per file: jq startup dominates
-    # this path, and the waybar module re-runs it every few seconds. input_filename
-    # carries the pid, which lives in the name rather than the record.
-    jq -r --arg us "$US" '
-        input_filename as $f
-        | [($f | sub(".*/"; "") | sub("\\.json$"; "")),
-           (.procStart // ""), (.status // "?"), (.name // ""),
-           (.cwd // ""), (.statusUpdatedAt // .startedAt // 0),
-           (.tmux // ""), (.waitingFor // .detail // ""), (.sessionId // ""),
-           (.jobId // .parkedJobId // ""), (.kind // ""), (.nameSource // "")]
-        | join($us)' "$SESSIONS"/*.json 2>/dev/null \
-    | while IFS=$US read -r pid pstart status name cwd supd tmx waiting sid job kind nsrc; do
-        case "$pid" in ''|*[!0-9]*) continue ;; esac
-        is_live "$pid" "$pstart" || continue
+# The conversation's title: the last one Claude Code recorded, whether you set
+# it (custom-title) or it was generated (ai-title). Those records are rewritten
+# as the conversation goes, so the LAST one is current.
+def title_of(path):
+    if not path:
+        return ""
+    for rec in last_records(path, b'"type":"custom-title"', b'"type":"ai-title"'):
+        if isinstance(rec, dict):
+            t = rec.get("customTitle") or rec.get("aiTitle")
+            if t:
+                return truncate(t)
+    return ""
 
-        # Claude Code writes exactly four statuses and drops anything else, so
-        # this list is the whole vocabulary rather than a guess:
-        #   waiting  blocked on you -- waitingFor says on what
-        #   idle     ready for your next prompt
-        #   busy     mid-turn
-        #   shell    idle, but the terminal is showing a shell rather than the
-        #            prompt (Ctrl-Z, `!`); Claude Code's own UI calls this
-        #            working, and so does this.
-        # An unrecognised or missing status therefore means "hasn't reported
-        # yet", not "urgent" -- ranking it 0 is what made a backgrounded shell
-        # sit at the top of the menu claiming to want input.
-        case "$status" in
-            waiting)    rank=0 ;;
-            idle)       rank=1 ;;
-            busy|shell) rank=2 ;;
-            *)          rank=2 ;;
-        esac
-        [ -n "$name" ] || name=$(basename "$cwd")
-        age=$(human_age $(( now - supd / 1000 )))
 
-        printf '%s\n' "$rank$US$status$US$pid$US$name$US$cwd$US$age$US$tmx$US$waiting$US$sid$US$supd$US$job$US$kind$US$nsrc"
-    # Folded (see below), then ordered: rank ascending, and most-recently-changed
-    # first within a rank. Sorting on the humanised age would compare "3d"
-    # against "49s" as text.
-    done \
-    | awk -F"$US" -v OFS="$US" '
-        # Park a session ($mod-whatever sends it to the background) and Claude
-        # Code keeps TWO records: the interactive one, now holding a parkedJobId,
-        # and a kind=bg one carrying the same id as its jobId. They are one piece
-        # of work, they share a name, and the bg record owns no window of its
-        # own -- so listing both gave two identical-looking rows, one of which
-        # focused nothing. Fold the bg row into its host and flag the host as
-        # carrying background work.
-        { row[NR] = $0; rank[NR] = $1 + 0; job[NR] = $11; kind[NR] = $12
-          if ($11 != "") { if ($12 == "bg") bg[$11] = NR; else host[$11] = NR } }
-        END {
-            for (i = 1; i <= NR; i++) {
-                j = job[i]
-                if (j != "" && kind[i] == "bg" && (j in host)) continue
-                $0 = row[i]
-                $14 = (kind[i] == "bg" || (j != "" && (j in bg))) ? "bg" : ""
-                # The status shown is the more urgent of the pair: while you are
-                # parked it is the bg job that is actually working, or actually
-                # blocked on a prompt, and that is the thing worth knowing.
-                if (j != "" && kind[i] != "bg" && (j in bg) && rank[bg[j]] < rank[i]) {
-                    split(row[bg[j]], f, FS)
-                    $1 = f[1]; $2 = f[2]; $8 = f[8]
-                }
-                print
-            }
-        }' \
-    | sort -t"$US" -k1,1n -k10,10nr
-}
+# --- formatting ------------------------------------------------------------
+def truncate(s, n=40):
+    return s if len(s) <= n else s[:n - 1] + "…"
 
-# --- focusing --------------------------------------------------------------
-focus() {  # pid, tmux-location
-    resolve_row "$1" "$2"
-    [ -n "$R_WIN" ] || return 1
-    swaymsg "[con_id=${R_WIN%%"$US"*}] focus" >/dev/null 2>&1 || return 1
-    case "$R_KIND" in
-        tmux)
-            # "session:@window.%pane" -- select both, so a multi-pane window lands right.
-            rest=${2#*:}; win=${rest%%.*}; pane=${rest#*.}
-            tmux select-window -t "${2%%:*}:$win" >/dev/null 2>&1
-            tmux select-pane   -t "$pane"        >/dev/null 2>&1
-            ;;
-        herdr)
-            # Workspace and tab first: those take any pane id, so they land you
-            # in the right place even for a pane herdr never recognised as an
-            # agent. `agent focus` then picks the exact pane inside a split tab.
-            # It reports a bad target in its JSON and still exits 0, so there is
-            # nothing to branch on -- hence all three, best-effort, in that order.
-            pane=${R_PANE%%"$US"*}
-            rest=${R_PANE#*"$US"}; ws=${rest%%"$US"*}
-            rest=${rest#*"$US"};   tab=${rest%%"$US"*}
-            "$HERDR" workspace focus "$ws"   >/dev/null 2>&1
-            "$HERDR" tab       focus "$tab"  >/dev/null 2>&1
-            "$HERDR" agent     focus "$pane" >/dev/null 2>&1
-            ;;
-    esac
-    return 0
-}
+
+def human_age(s):
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    if s < 86400:
+        return f"{s // 3600}h"
+    return f"{s // 86400}d"
+
+
+def short_cwd(p):
+    if p == HOME:
+        return "~"
+    if p.startswith(HOME + "/"):
+        return "~" + p[len(HOME):]
+    return p
+
+
+def ctx_k(ctx):
+    return f"{(ctx + 500) // 1000}k" if ctx is not None else ""
+
 
 # The menu is drawn with pango markup, so everything interpolated into a row has
 # to be escaped: an "&" in a cwd, a session name or a herdr workspace label would
 # otherwise swallow the rest of the line. Escape AFTER padding -- "&amp;" is five
-# columns wide to printf and one to rofi.
-esc() { printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'; }
+# columns wide to padw and one to rofi.
+def esc(s):
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-short_cwd() {
-    case "$1" in
-        "$HOME")   printf '~' ;;
-        "$HOME"/*) printf '~%s' "${1#"$HOME"}" ;;
-        *)         printf '%s' "$1" ;;
-    esac
-}
+
+# The DISPLAY width, which is what rofi draws (its default font is "mono 12", so
+# padding with spaces actually aligns): one "✳", or the "⑂" Claude Code
+# marks a forked session with, is one column; a wide CJK character is two; a
+# combining mark is none.
+def width(s):
+    return sum(0 if unicodedata.combining(c)
+               else 2 if unicodedata.east_asian_width(c) in "WF" else 1
+               for c in s)
+
+
+def padw(s, w):
+    return s + " " * max(0, w - width(s))
+
+
+# --- focusing --------------------------------------------------------------
+def focus(r):
+    r.resolve()
+    if not r.win:
+        return False
+    try:
+        if subprocess.run(["swaymsg", f"[con_id={r.win[0]}] focus"],
+                          capture_output=True, timeout=5).returncode != 0:
+            return False
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if r.host == "tmux":
+        # "session:@window.%pane" -- select both, so a multi-pane window lands right.
+        sess, _, rest = r.tmux.partition(":")
+        win, _, pane = rest.partition(".")
+        run("tmux", "select-window", "-t", f"{sess}:{win}")
+        run("tmux", "select-pane", "-t", pane)
+    elif r.host == "herdr":
+        # Workspace and tab first: those take any pane id, so they land you in
+        # the right place even for a pane herdr never recognised as an agent.
+        # `agent focus` then picks the exact pane inside a split tab. It reports
+        # a bad target in its JSON and still exits 0, so there is nothing to
+        # branch on -- hence all three, best-effort, in that order.
+        run(HERDR, "workspace", "focus", r.pane.ws_id)
+        run(HERDR, "tab", "focus", r.pane.tab_id)
+        run(HERDR, "agent", "focus", r.pane.pane_id)
+    return True
+
 
 # --- commands --------------------------------------------------------------
-case "${1:-menu}" in
-    list)
-        printf 'STATUS\tWINDOW\tPID\tNAME\tCWD\tAGE\tCTX\tWHERE\n'
-        enumerate | while IFS=$US read -r rank status pid name cwd age tmx waiting sid supd job kind nsrc bgf; do
-            t=$(transcript_for "$cwd" "$sid")
-            ctx=$(context_of "$t") || ctx=""
-            # Resolved HERE, before the label, and not inside the $(...) that
-            # asks for one: a command substitution runs in a subshell, so a
-            # lookup made in there is thrown away, and both the sway tree and
-            # the herdr pane map would be rebuilt for every row. Resolving in
-            # this shell first leaves the answer where the subshell inherits it.
-            resolve_row "$pid" "$tmx"
-            set_display_name "$name" "$nsrc"
-            label=$(label_for_row "$pid" "$tmx") || label=""
-            # A tmux or herdr session whose client has gone resolves to no
-            # window, but saying where it lives is still the useful half of the
-            # answer.
-            case "$R_KIND" in
-                tmux)  host="tmux $tmx" ;;
-                herdr) host="herdr ${R_PANE%%"$US"*}" ;;
-                *)     host="" ;;
-            esac
-            if   [ -n "$R_WIN" ]; then where="con ${R_WIN%%"$US"*}${host:+ $host}"
-            elif [ -n "$host" ];  then where="$host (no client attached)"
-            else where="-"
-            fi
-            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-                "$status${bgf:+/bg}" "${label:--}" "$pid" "$DISPLAY_NAME" \
-                "$(short_cwd "$cwd")" "$age" \
-                "${ctx:+$(( (ctx + 500) / 1000 ))k}" "$where"
-        done
-        ;;
+def cmd_list():
+    now = int(time.time())
+    print("STATUS\tWINDOW\tPID\tNAME\tCWD\tAGE\tCTX\tWHERE")
+    for r in enumerate_sessions():
+        r.resolve()
+        # A tmux or herdr session whose client has gone resolves to no window,
+        # but saying where it lives is still the useful half of the answer.
+        host = {"tmux": f"tmux {r.tmux}",
+                "herdr": f"herdr {r.pane.pane_id}" if r.pane else ""}.get(r.host, "")
+        if r.win:
+            where = f"con {r.win[0]}" + (f" {host}" if host else "")
+        elif host:
+            where = f"{host} (no client attached)"
+        else:
+            where = "-"
+        print("\t".join([
+            r.status + ("/bg" if r.bg else ""), r.label() or "-", str(r.pid),
+            r.display_name(), short_cwd(r.cwd), human_age(now - r.supd // 1000),
+            ctx_k(context_of(r.transcript())), where]))
 
-    waybar)
-        # Polled path: only the small per-PID jsons, never a transcript.
+
+def cmd_waybar():
+    # Polled path: only the small per-PID jsons, never a transcript -- except to
+    # name a notification, which happens once per transition, not once per poll.
+    #
+    # This is also where the ready-transition notification lives, because it is
+    # the only thing running on a timer. SEEN records what each session's rank
+    # was last poll, so a notification fires on the EDGE into wanting you, not
+    # on every poll where something happens to be idle.
+    #
+    # Two cases must stay silent, and both need that per-pid history rather than
+    # a simple "is anything ready" check:
+    #   - the first poll after waybar starts, when every already-idle session
+    #     would otherwise announce itself at once;
+    #   - a session you just opened, which is idle from birth and has never
+    #     been working.
+    # Both fall out of the same rule: notify only for a pid seen last poll.
+    prev = {}
+    try:
+        with open(SEEN) as f:
+            for tok in f.read().split():
+                pid, _, rank = tok.partition(":")
+                if pid.isdigit() and rank.isdigit():
+                    prev[int(pid)] = int(rank)
+    except OSError:
+        pass
+
+    rows = enumerate_sessions()
+    ready = sum(r.rank == 1 for r in rows)
+    action = sum(r.rank == 0 for r in rows)
+    for r in rows:
+        if r.rank == 2:
+            continue                                   # still working, nothing to say
+        if r.pid not in prev:
+            continue                                   # never seen: stay quiet
+        # Any CHANGE into a wants-you rank, not just one arriving from rank 2.
+        # Polls are seconds apart, so a session can go idle -> working ->
+        # blocked-on-a-prompt between two of them; keying on "came from
+        # working" would swallow that permission prompt entirely.
+        if prev[r.pid] == r.rank:
+            continue                                   # unchanged: already said so
+
+        # A blocked session gets critical, which in this dunstrc means timeout
+        # 0 -- it stays up until dismissed ($mod+n), and outranks
+        # do-not-disturb. That is the point: it is blocking, and if you are away
+        # from the desk it must still be there when you get back. The cost is
+        # that it lingers after you have answered the prompt, since nothing
+        # closes it. Drop it to normal if you would rather it faded.
+        if r.rank == 0:
+            urg, head, detail = "critical", "Claude needs you", r.waiting or r.status
+        else:
+            urg, head, detail = "normal", "Claude ready", "waiting for input"
+        # Named the way the menu names it. A stack tag per pid, so several
+        # sessions finishing do not collapse into one another the way a shared
+        # tag would.
+        notify(urg, head,
+               f"{r.display_name(resolve_host=False)} - {detail}\n{short_cwd(r.cwd)}",
+               f"claude-session-{r.pid}")
+
+    # Written atomically, and only ever holding live pids, so an exited session
+    # cannot leave a rank behind for a future pid to inherit.
+    tmp = f"{SEEN}.{os.getpid()}"
+    try:
+        with open(tmp, "w") as f:
+            f.write(" " + "".join(f"{r.pid}:{r.rank} " for r in rows) + "\n")
+        os.replace(tmp, SEEN)
+    except OSError:
+        pass
+
+    if action:
+        cls, txt = "claude-action", f"!{action}"
+    elif ready:
+        cls, txt = "claude-ready", f"●{ready}"
+    else:
+        cls, txt = "claude-none", "●0"
+    print(json.dumps({"text": txt, "tooltip": f"{ready} of {len(rows)} Claude session(s) ready",
+                      "class": [cls]}, ensure_ascii=False, separators=(",", ":")))
+
+
+def cmd_menu():
+    rows = enumerate_sessions()
+    if not rows:
+        notify("low", "Claude sessions", "None running", "claude-sessions", timeout=3000)
+        return
+
+    # Resolved first, formatted second. The leading column is the WINDOW's name
+    # -- the thing you are actually picking, and the same string $mod+o shows --
+    # so no column width is known until every row has one.
+    now = int(time.time())
+    rich = [(r, r.label() or "-", r.display_name(), context_of(r.transcript())) for r in rows]
+    wl = max(width(label) for _, label, _, _ in rich) or 12
+    wn = max(width(name) for _, _, name, _ in rich) or 12
+
+    lines = []
+    for r, label, name, ctx in rich:
+        if r.rank == 1:
+            mark, word = '<span foreground="#8ec07c">●</span>', "ready"
+        elif r.rank == 2:
+            # `shell` shares a rank with `busy` but not a meaning -- nothing is
+            # running, the terminal is just showing a shell rather than the
+            # prompt. Cheap to say, and it explains the dim mark.
+            mark = '<span foreground="#5c5c5c">◐</span>'
+            word = "shell" if r.status == "shell" else "working"
+        else:
+            mark, word = '<span foreground="#d79921">!</span>', r.status
+        extra = esc(short_cwd(r.cwd))
+        if r.tmux:
+            extra += "  <i>tmux</i>"
+        if r.host == "herdr":
+            extra += "  <i>herdr</i>"
+        if r.bg:
+            extra += "  <i>bg</i>"
+        if r.waiting:
+            extra += f"  <i>{esc(r.waiting)}</i>"
+        ctxs = f"{ctx_k(ctx)} ctx" if ctx is not None else ""
+        # Pango markup must wrap the already-padded text: padding inside a tag
+        # still counts, but the label has to be padded before it is bolded or
+        # the trailing spaces land outside the column.
         #
-        # This is also where the ready-transition notification lives, because it
-        # is the only thing running on a timer. SEEN records what each session's
-        # rank was last poll, so a notification fires on the EDGE from working to
-        # wanting you, not on every poll where something happens to be idle.
-        #
-        # Two cases must stay silent, and both need that per-pid history rather
-        # than a simple "is anything ready" check:
-        #   - the first poll after waybar starts, when every already-idle session
-        #     would otherwise announce itself at once;
-        #   - a session you just opened, which is idle from birth and has never
-        #     been working.
-        # Both fall out of the same rule: notify only when this pid was seen
-        # before AND was working then.
-        prev=$(cat "$SEEN" 2>/dev/null)
-        cur=' '                                    # leading space: see the lookup below
+        # The session's name sits one column right and dimmed: it is what
+        # `claude` calls itself and what a notification says. A DERIVED name
+        # shows the conversation's title instead (see display_name), and so
+        # does the notification, so the link holds either way.
+        lines.append(f'{mark} <b>{esc(padw(label, wl))}</b>  '
+                     f'<span foreground="#5c5c5c">{esc(padw(name, wn))}  '
+                     f'{word:<7} {human_age(now - r.supd // 1000):>6} '
+                     f'{ctxs:>8}  {extra}</span>')
 
-        ready=0 action=0 total=0
-        while IFS=$US read -r rank status pid name cwd age tmx waiting sid supd job kind nsrc bgf; do
-            [ -n "$pid" ] || continue
-            total=$(( total + 1 ))
-            [ "$rank" -eq 1 ] && ready=$(( ready + 1 ))
-            [ "$rank" -eq 0 ] && action=$(( action + 1 ))
-            cur="$cur$pid:$rank "
+    # -format i returns the chosen INDEX, so nothing has to be parsed back out
+    # of a decorated display string.
+    try:
+        p = subprocess.run(["rofi", "-dmenu", "-i", "-markup-rows", "-format", "i",
+                            "-p", "claude", "-no-custom"],
+                           input="\n".join(lines) + "\n", capture_output=True, text=True)
+    except OSError:
+        return
+    sel = p.stdout.strip()
+    if p.returncode != 0 or not sel.isdigit() or int(sel) >= len(rows):
+        return
+    r = rows[int(sel)]
+    if not focus(r):
+        why = {"tmux": f" (tmux {r.tmux}, no client attached?)",
+               "herdr": f" (herdr {r.pane.pane_id}, no client attached?)" if r.pane else ""
+               }.get(r.host, "")
+        notify("normal", "Claude sessions", f"No window found for pid {r.pid}{why}",
+               "claude-sessions", timeout=4000)
 
-            [ "$rank" -eq 2 ] && continue          # still working, nothing to say
-            # Matched on " <pid>:" with the space, not on "<pid>:" alone --
-            # a bare substring match would find pid 1234 inside an entry for
-            # 51234 and read someone else's rank. Every entry is space-delimited
-            # on both sides, so the trailing "%% *" always finds its terminator.
-            case "$prev" in
-                *" $pid:"*) was=${prev##*" $pid":}; was=${was%% *} ;;
-                *)          continue ;;            # never seen: stay quiet
-            esac
-            # Any CHANGE into a wants-you rank, not just one arriving from
-            # rank 2. Polls are seconds apart, so a session can go idle ->
-            # working -> blocked-on-a-prompt between two of them; keying on
-            # "came from working" would swallow that permission prompt entirely.
-            [ "$was" != "$rank" ] || continue      # unchanged: already said so
 
-            # A blocked session gets critical, which in this dunstrc means
-            # timeout 0 -- it stays up until dismissed ($mod+n), and outranks
-            # do-not-disturb. That is the point: it is blocking, and if you are
-            # away from the desk it must still be there when you get back. The
-            # cost is that it lingers after you have answered the prompt, since
-            # nothing closes it. Drop it to normal if you would rather it faded.
-            if [ "$rank" -eq 0 ]; then
-                urg=critical; head="Claude needs you"; detail="${waiting:-$status}"
-            else
-                urg=normal;   head="Claude ready";     detail="waiting for input"
-            fi
-            # A stack tag per pid, so several sessions finishing do not collapse
-            # into one another the way a shared tag would.
-            notify-send -a claude -u "$urg" \
-                -h "string:x-dunst-stack-tag:claude-session-$pid" \
-                "$head" "$name - $detail
-$(short_cwd "$cwd")"
-        done <<EOF
-$(enumerate)
-EOF
+def main():
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "menu"
+    handler = {"list": cmd_list, "menu": cmd_menu, "waybar": cmd_waybar}.get(cmd)
+    if not handler:
+        print("usage: claude-sessions [list|menu|waybar]", file=sys.stderr)
+        sys.exit(1)
+    handler()
 
-        # Written atomically, and only ever holding live pids, so an exited
-        # session cannot leave a rank behind for a future pid to inherit.
-        tmp="$SEEN.$$"
-        printf '%s\n' "$cur" > "$tmp" && mv -f "$tmp" "$SEEN"
 
-        if   [ "$action" -gt 0 ]; then cls=claude-action; txt="!$action"
-        elif [ "$ready"  -gt 0 ]; then cls=claude-ready;  txt="●$ready"
-        else                           cls=claude-none;   txt="●0"
-        fi
-        printf '{"text":"%s","tooltip":"%s of %s Claude session(s) ready","class":["%s"]}\n' \
-            "$txt" "$ready" "$total" "$cls"
-        ;;
-
-    menu)
-        rows=$(enumerate)
-        [ -n "$rows" ] || { notify-send -a claude -u low -t 3000 \
-            -h string:x-dunst-stack-tag:claude-sessions \
-            'Claude sessions' 'None running'; exit 0; }
-
-        # Resolved first, formatted second. The leading column is the WINDOW's
-        # name -- the thing you are actually picking, and the same string $mod+o
-        # shows -- so no column width is known until every row has one. The sway
-        # tree is cached, so this stays one swaymsg call however many rows there
-        # are.
-        rich=''
-        while IFS=$US read -r rank status pid name cwd age tmx waiting sid supd job kind nsrc bgf; do
-            [ -n "$pid" ] || continue
-            resolve_row "$pid" "$tmx"   # before the label; see the list branch
-            set_display_name "$name" "$nsrc"
-            label=$(label_for_row "$pid" "$tmx") || label=""
-            hst=''; [ "$R_KIND" = herdr ] && hst=herdr
-            t=$(transcript_for "$cwd" "$sid")
-            ctx=$(context_of "$t") || ctx=""
-            rich="$rich$rank$US$status$US$pid$US$DISPLAY_NAME$US$cwd$US$age$US$tmx$US$waiting$US$bgf$US${label:--}$US$ctx$US$hst
-"
-        done <<EOF
-$rows
-EOF
-
-        # Two parallel lists: what rofi shows, and the pid/tmux it maps to.
-        # -format i returns the chosen INDEX, so nothing has to be parsed back
-        # out of a decorated display string.
-        # Widths of the two name columns, so they line up (rofi's default font
-        # is "mono 12", so padding with spaces actually aligns).
-        #
-        # Measured with `wc -L`, the DISPLAY width, and padded through padw,
-        # because neither of the obvious tools counts what rofi draws: mawk's
-        # length and printf's %-*s both count bytes, so one "\u2733" or the
-        # "\u2442" Claude Code marks a forked session with left a row two
-        # columns short of the rest.
-        colw() { m=$(printf '%s' "$rich" | cut -d"$US" -f"$1" | wc -L)
-                 [ "$m" -gt 0 ] 2>/dev/null || m=$2
-                 printf '%s\n' "$m"; }
-
-        # Pad to a display width, by asking printf for however many BYTES that
-        # comes to for this particular string.
-        padw() { w=$(printf '%s' "$2" | wc -L); b=$(printf '%s' "$2" | wc -c)
-                 printf '%-*s' "$(( $1 + b - w ))" "$2"; }
-        wl=$(colw 10 12)
-        wn=$(colw 4 12)
-
-        menu='' keys=''
-        while IFS=$US read -r rank status pid name cwd age tmx waiting bgf label ctx hst; do
-            [ -n "$pid" ] || continue
-            case "$rank" in
-                1) mark='<span foreground="#8ec07c">●</span>'; word=ready ;;
-                # `shell` shares a rank with `busy` but not a meaning -- nothing
-                # is running, the terminal is just showing a shell rather than
-                # the prompt. Cheap to say, and it explains the dim mark.
-                2) mark='<span foreground="#5c5c5c">◐</span>'
-                   if [ "$status" = shell ]; then word=shell; else word=working; fi ;;
-                *) mark='<span foreground="#d79921">!</span>'; word=$status ;;
-            esac
-            extra=$(esc "$(short_cwd "$cwd")")
-            [ -n "$tmx" ] && extra="$extra  <i>tmux</i>"
-            [ -n "$hst" ] && extra="$extra  <i>$hst</i>"
-            [ -n "$bgf" ] && extra="$extra  <i>bg</i>"
-            [ -n "$waiting" ] && extra="$extra  <i>$(esc "$waiting")</i>"
-            # Pango markup must wrap the already-padded text: padding inside a
-            # tag still counts, but the name has to be padded before it is bolded
-            # or the trailing spaces land outside the column.
-            padded=$(esc "$(padw "$wl" "$label")")
-            # The session's name stays, one column right and dimmed: it is what
-            # `claude` calls itself and what a notification says, so losing it
-            # would break the link between the two. The one exception is a
-            # DERIVED name standing in for a herdr pane's title (see
-            # set_display_name) -- there the link was to a token that named
-            # nothing, and the title is what the notification should have said.
-            pname=$(esc "$(padw "$wn" "$name")")
-            line=$(printf '%s <b>%s</b>  <span foreground="#5c5c5c">%s  %-7s %6s %8s  %s</span>' \
-                   "$mark" "$padded" "$pname" "$word" "$age" \
-                   "${ctx:+$(( (ctx + 500) / 1000 ))k ctx}" "$extra")
-            menu="$menu$line
-"
-            keys="$keys$pid	$tmx
-"
-        done <<EOF
-$rich
-EOF
-
-        idx=$(printf '%s' "$menu" | rofi -dmenu -i -markup-rows -format i \
-                  -p claude -no-custom) || exit 0
-        [ -n "$idx" ] || exit 0
-
-        sel=$(printf '%s' "$keys" | sed -n "$(( idx + 1 ))p")
-        pid=$(printf '%s' "$sel" | cut -f1)
-        tmx=$(printf '%s' "$sel" | cut -f2)
-        [ -n "$pid" ] || exit 0
-
-        if ! focus "$pid" "$tmx"; then
-            case "$R_KIND" in
-                tmux)  why=" (tmux $tmx, no client attached?)" ;;
-                herdr) why=" (herdr ${R_PANE%%"$US"*}, no client attached?)" ;;
-                *)     why="" ;;
-            esac
-            notify-send -a claude -u normal -t 4000 \
-                -h string:x-dunst-stack-tag:claude-sessions \
-                'Claude sessions' "No window found for pid $pid$why"
-        fi
-        ;;
-
-    *)
-        echo "usage: claude-sessions [list|menu|waybar]" >&2
-        exit 1
-        ;;
-esac
+if __name__ == "__main__":
+    main()

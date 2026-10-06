@@ -95,8 +95,17 @@ Per-PID state in `$XDG_RUNTIME_DIR/claude-sessions.seen` makes that an edge and
 not a nag.
 
 Session data comes from `~/.claude/sessions/<pid>.json` and the transcript
-`.jsonl`, read backwards with `tac | grep -m1 '"usage"'` so context accounting
-costs one line and not a whole file.
+`.jsonl`. The transcript is searched backwards through an `mmap`, so reading the
+context in use (the last `"usage"` record) and the conversation's title (the last
+`ai-title` or `custom-title`) costs however far back the answer is, not the size
+of the file. That title is what a row is called whenever the session's own name
+is only the derived `<dir>-<hash>` placeholder.
+
+It is Python rather than `sh`, unlike everything else in `bin/`. The shell
+version spent most of its time starting processes — dozens of `awk`, `jq` and
+`sed` calls per row — and its worst bug was a cache filled inside `$(...)` and
+thrown away with the subshell, which fetched the sway tree 69 times for one
+menu. The port lists a dozen sessions in about 0.15s, down from 3.4s.
 
 ## `night-light` — gammastep, where you can see it
 
