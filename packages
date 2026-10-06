@@ -27,7 +27,8 @@ req   waybar                  waybar          # 0.15.0-1
 req   foot                    foot            # 1.25.0-1, arrives via sway
 req   wmenu                   wmenu-run       # 0.2.0-1, arrives via sway
 req   rofi                    rofi            # 2.0.0-0.2
-req   jq                      jq              # 1.8.1-4ubuntu2, every script uses it
+req   jq                      jq              # 1.8.1-4ubuntu2, every sh script uses it
+req   python3                 python3         # 3.14, claude-sessions; ships with Ubuntu
 
 # --- notifications --------------------------------------------------------
 req   dunst                   dunstctl        # 1.12.2-1build1

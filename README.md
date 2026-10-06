@@ -7,7 +7,9 @@ There is no framework here and nothing to configure but text files. The sway
 config is one 498-line file, and roughly half of it is comments explaining why
 each choice is what it is — including the three or four places where the
 obvious approach is quietly wrong. The scripts are POSIX `sh`, about 1,300
-lines in total, no bash-isms and no runtime to install.
+lines in total, no bash-isms and no runtime to install. The one exception is
+`claude-sessions`, which is Python (standard library only): it outgrew the
+shell, and most of its bugs had become the shell's rather than its own.
 
 It runs on Ubuntu 26.04 on a ThinkPad T14. Most of it is portable; the handful
 of things that are not are listed under [Things you will want to
