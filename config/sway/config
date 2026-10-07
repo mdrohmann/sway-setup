@@ -43,14 +43,19 @@ include /etc/sway/config-vars.d/*
 #
 # Example configuration:
 #
-# Lock after 5 min idle, blank the display after 10, and always lock before
-# suspend so a closed lid never exposes the session.
+# Lock after 5 min idle, power the displays off after 30, and always lock
+# before suspend so a closed lid never exposes the session. Any input powers
+# them back on through `resume`; the lock screen is what you come back to.
 #
-# hyprlock has no -f: it blocks until unlocked. For the timeouts that is fine
-# (swayidle does not wait on those), but -w makes swayidle hold a systemd sleep
-# inhibitor until before-sleep returns, so a blocking locker there would stall
-# suspend until someone unlocked the machine. Hence the background-and-settle
-# form: hyprlock gets ~1s to grab ext-session-lock, then the inhibitor drops.
+# hyprlock has no -f: it blocks until unlocked, so it is backgrounded EVERYWHERE
+# here. -w makes swayidle wait on every command it runs, not just before-sleep:
+# its event loop stops until the command exits. A foreground lock in the
+# 5-minute timeout therefore froze swayidle for as long as the screen stayed
+# locked, and the power-off timeout behind it never fired -- the display sat on
+# the lock screen all night. In before-sleep, -w is the point (swayidle holds a
+# systemd sleep inhibitor until it returns), so there it is the
+# background-and-settle form: hyprlock gets ~1s to grab ext-session-lock, then
+# the inhibitor drops.
 #
 # lock-session wraps hyprlock: it re-powers the outputs after unlock, because a
 # fingerprint unlock produces no seat activity and so never fires the `resume`
@@ -58,8 +63,8 @@ include /etc/sway/config-vars.d/*
 # guard for the double-lock case, where the idle timeout fires and suspend
 # follows: a second instance would fight the first for the session lock.
 exec swayidle -w \
-         timeout 300 '~/.local/bin/lock-session' \
-         timeout 600 'swaymsg "output * power off"' resume 'swaymsg "output * power on"' \
+         timeout 300 '~/.local/bin/lock-session &' \
+         timeout 1800 'swaymsg "output * power off"' resume 'swaymsg "output * power on"' \
          before-sleep '~/.local/bin/lock-session & sleep 1'
 
     # Lock on demand. swaylock stays installed as a fallback.
