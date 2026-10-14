@@ -237,19 +237,22 @@ unread_of() {  # app, title
         slack)
             # Slack's own title conventions, the only handle a browser tab offers
             # short of the Slack API:
-            #   "! <name> - <workspace> - N new items - Slack"  mentions and DMs
-            #   "* <name> - <workspace> - Slack"                ordinary unread
-            # Only the "!" form counts: that is the "needs you" state, and a busy
-            # channel you are not named in should not light the bar up. Slack
-            # says one or the other whatever view is open, so this parser never
-            # answers "unknown" and the cache never engages for it.
-            case "$2" in
-                '!'*)
-                    n=$(printf '%s' "$2" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) new item.*/\1/p')
-                    printf '%s\n' "${n:-1}"   # "!" with no count still means you
-                    ;;
-                *) echo 0 ;;
-            esac
+            #   "<name> - <workspace> - N new items - Slack"  mentions and DMs
+            #   "* <name> - <workspace> - Slack"              ordinary unread
+            # The count is the "needs you" state, and a busy channel you are not
+            # named in should not light the bar up, so only "N new item(s)"
+            # counts. It is matched anywhere in the title, not behind a leading
+            # "!": Slack used to prefix one, then stopped, and a parser keyed on
+            # it read every mention as 0 -- the bar sat quiet with a DM waiting
+            # and the title saying "1 new item". A bare "!" is still honoured in
+            # case it comes back without a count. Slack says one or the other
+            # whatever view is open, so this parser never answers "unknown" and
+            # the cache never engages for it.
+            n=$(printf '%s' "$2" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) new item.*/\1/p')
+            if   [ -n "$n" ]; then printf '%s\n' "$n"
+            elif [ "${2#!}" != "$2" ]; then echo 1   # "!" with no count still means you
+            else echo 0
+            fi
             ;;
         gmail)
             # Gmail's title is a property of the CURRENT VIEW, not of the mailbox:
