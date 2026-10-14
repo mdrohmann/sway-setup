@@ -1,5 +1,5 @@
 #!/bin/sh
-# Open a terminal with a fixed, memorable name, e.g. "brave otter - ~/ion/core".
+# Open a terminal with a fixed, memorable name, e.g. "brave otter - ~/src/core".
 #
 # The point is $mod+o (rofi -show window), which lists windows by title. Left to
 # itself every foot window is titled "martin@host: ~" by the precmd hook in

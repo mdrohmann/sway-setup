@@ -210,7 +210,7 @@ class Pane:
     # its terminal title with a marker (a spinner while it works, a static one
     # otherwise), which herdr keeps in terminal_title and removes from
     # terminal_title_stripped. That prefix is the whole test -- without it the
-    # title is the shell's idea of one ("martin@host: ~/ion"), which says
+    # title is the shell's idea of one ("martin@host: ~/src"), which says
     # nothing a row does not already show. Same reasoning as window_label: a
     # title is worth reading only while something is holding it steady.
     title: str

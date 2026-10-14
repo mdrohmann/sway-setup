@@ -358,7 +358,7 @@ bindsym $mod+r mode "resize"
     #: Bring back the last dismissed notification (again for the one before)
     bindsym $mod+Ctrl+n       exec dunstctl history-pop
     #: Pause or resume notifications
-    bindsym $mod+Ctrl+Shift+n exec dunstctl set-paused toggle
+    bindsym $mod+Ctrl+Shift+n exec ~/.local/bin/dnd toggle
 
     # How the screen looks, on two keys that sit together because the two get
     # confused for each other: the night-light warms everything, and on a dark
@@ -397,6 +397,11 @@ bindsym $mod+r mode "resize"
     bindsym Ctrl+Print       exec grimshot --notify copy screen
     #: Screenshot a selected area to the clipboard
     bindsym Ctrl+Shift+Print exec grimshot --notify copy area
+    # Screen recording lives with the screenshots. scribecut is run straight
+    # from its cargo build, so a `cargo build --release` is all it takes to
+    # update it -- and a machine without the checkout just gets a dead key.
+    #: Start scribecut, the screen recorder
+    bindsym $mod+Shift+Print exec ~/projects/scribecut/target/release/scribecut
 
 #
 # Status Bar:

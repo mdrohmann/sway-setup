@@ -373,6 +373,25 @@ window#waybar {
     color: #5c5c5c;
 }
 
+/* Notifications (dunst). Flowing is the normal state, so it stays dim; paused
+ * is a state you chose and probably meant to undo -- or one scribecut left
+ * behind -- so it gets the attention amber, like nl-off. */
+#custom-dnd {
+    padding: 0 8px;
+}
+
+#custom-dnd.dnd-off {
+    opacity: 0.45;
+}
+
+#custom-dnd.dnd-on {
+    color: #d79921;
+}
+
+#custom-dnd.dnd-gone {
+    color: #5c5c5c;
+}
+
 /* Slack (U+F198 fa-slack). White while running and quiet, like every other
  * always-present module here; the warning amber when something is addressed to
  * you; the inactive grey only when Slack is not running, the same way

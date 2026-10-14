@@ -203,7 +203,7 @@ only so sway and waybar need not know the two are the same program. It resolves
 ## `named-term` — terminals you can find again
 
 `$mod+Return`. Opens foot with its title locked to `<adjective> <animal> - <cwd>`
-— `brave otter - ~/ion/core` — chosen from 20 adjectives and 30 animals, with
+— `brave otter - ~/src/core` — chosen from 20 adjectives and 30 animals, with
 collision retry.
 
 The point is `$mod+o` (`rofi -show window`). A window list of nine terminals all

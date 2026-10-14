@@ -28,13 +28,14 @@ so you read it out of the corner of your eye instead of parsing a countdown.
 
 | | Key | What it does |
 |---|---|---|
-| [`named-term`](bin/named-term) | `$mod+Return` | Terminals named `brave otter - ~/ion/core`, so `rofi -show window` is navigable. Opens in the focused terminal's directory. |
+| [`named-term`](bin/named-term) | `$mod+Return` | Terminals named `brave otter - ~/src/core`, so `rofi -show window` is navigable. Opens in the focused terminal's directory. |
 | [`claude-sessions`](bin/claude-sessions) | `$mod+g` | Lists running Claude Code sessions with status and context usage; jumps to the terminal hosting one, through tmux or herdr if needed. |
 | [`keys`](bin/keys) | `$mod+slash` | Every key binding and what it does, in a rofi picker that also runs the one you choose. Descriptions are parsed out of this config's own comments. |
 | [`webapp`](bin/webapp) / [`slack`](bin/slack) | `$mod+c`, `$mod+m` | Slack and Gmail as Chrome app windows pinned to named workspaces, with unread counts scraped from the window title. |
 | [`pomodoro`](bin/pomodoro) | `$mod+t` | A tomato in the bar that ripens 🌱 → 🌿 → 🍅 as the session runs, then blinks. |
 | [`lock-session`](bin/lock-session) | `$mod+Ctrl+l` | Wraps hyprlock. Nineteen lines, two of which are bug fixes — see below. |
 | [`night-light`](bin/night-light) | `$mod+Shift+b` | Toggles gammastep, and puts its state in the bar — during the day an armed night-light and no night-light look identical. |
+| [`dnd`](bin/dnd) | `$mod+Ctrl+Shift+n` | A bell in the bar, struck out with a count while dunst is holding notifications — paused notifications are otherwise invisible by design. |
 | [`foot-theme`](bin/foot-theme) | `$mod+Ctrl+b` | Flips every running foot between Solarized Light and Dark. foot keeps both palettes loaded and swaps on a signal; this remembers which one is showing. |
 | [`volume`](bin/volume) / [`brightness`](bin/brightness) | media keys | Matching dunst OSDs, `--locked` so they work on the lock screen, `Shift` for 1% steps. |
 | [`clip-sync`](bin/clip-sync) | (runs at start) | Keeps PRIMARY and CLIPBOARD in sync, so it stops mattering which one you used. |

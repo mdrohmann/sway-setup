@@ -1,0 +1,49 @@
+#!/bin/sh
+# dunst's do-not-disturb state, for waybar -- and the toggle that changes it.
+#
+# Usage: dnd [waybar|toggle]
+#
+# Paused dunst is silent by design, which is exactly what makes it easy to
+# forget: nothing on screen says notifications are being held, and they pile up
+# unseen until someone unpauses. $mod+Ctrl+Shift+n is not the only thing that
+# pauses it either -- scribecut pauses dunst while it records, and a recording
+# that ends badly leaves it paused. So the state is asked of dunst on every
+# poll rather than remembered from the last toggle.
+
+case "${1:-waybar}" in
+    toggle)
+        dunstctl set-paused toggle
+        # RTMIN+9 is this module's signal in the waybar config: redraw now
+        # rather than at the next poll.
+        pkill -RTMIN+9 -x waybar
+        ;;
+
+    waybar)
+        paused=$(dunstctl is-paused 2>/dev/null)
+        # U+F0F3 fa-bell while notifications flow, U+F1F6 fa-bell-slash while
+        # they are held. Written as octal UTF-8 for the reason webapp gives:
+        # Private Use Area glyphs get lost when pasted around.
+        case "$paused" in
+            false)
+                cls=dnd-off; txt=$(printf '\357\203\263')
+                tip="Notifications on" ;;
+            true)
+                # The held count is the useful part: it says how much you are
+                # missing, and so how much arrives at once when you unpause.
+                n=$(dunstctl count waiting 2>/dev/null)
+                cls=dnd-on; txt=$(printf '\357\207\266')
+                [ "${n:-0}" -gt 0 ] 2>/dev/null && txt="$txt $n"
+                tip="Notifications paused, ${n:-0} waiting" ;;
+            *)
+                cls=dnd-gone; txt=$(printf '\357\207\266')
+                tip="dunst is not running" ;;
+        esac
+        jq -cn --arg t "$txt" --arg tip "$tip" --arg c "$cls" \
+           '{text: $t, tooltip: $tip, class: [$c]}'
+        ;;
+
+    *)
+        echo "usage: dnd [waybar|toggle]" >&2
+        exit 1
+        ;;
+esac

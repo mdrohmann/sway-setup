@@ -14,7 +14,7 @@
     "modules-right": ["custom/pomodoro", "custom/claude", "custom/slack", "custom/gmail",
                       "privacy",
                       "cpu", "memory", "temperature", "bluetooth",
-                      "custom/night-light", "tray",
+                      "custom/night-light", "custom/dnd", "tray",
                       "battery", "clock"],
 
     "sway/workspaces": {
@@ -189,6 +189,21 @@
         "interval": 30,
         "signal": 8,
         "on-click": "$HOME/.local/bin/night-light toggle"
+    },
+
+    "custom/dnd": {
+        // Whether dunst is holding notifications back: a bell while they flow,
+        // a struck-out bell and the number waiting while paused. Logic lives in
+        // ~/.local/bin/dnd; the dnd-* classes are styled in style.css.
+        //
+        // Polled as well as signalled. $mod+Ctrl+Shift+n and a click here send
+        // RTMIN+9 for an instant redraw, but scribecut pauses dunst on its own
+        // while recording, and nothing announces that.
+        "exec": "$HOME/.local/bin/dnd waybar",
+        "return-type": "json",
+        "interval": 3,
+        "signal": 9,
+        "on-click": "$HOME/.local/bin/dnd toggle"
     },
 
     "tray": {
