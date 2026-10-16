@@ -478,7 +478,11 @@ exec blueman-applet
 # Started here rather than by its packaged systemd user unit: that unit is
 # WantedBy=graphical-session.target, which never activates in this session
 # because gdm execs sway directly instead of going through systemd. The unit
-# is disabled so it cannot start a second copy if that ever changes.
+# must be disabled *globally* (`sudo systemctl --global disable poweralertd`),
+# not just with --user: the package enables it for every user, and the GDM
+# greeter's GNOME session does reach graphical-session.target. Left enabled,
+# it pops a power notification on the login screen after every logout, which
+# reads as if the alert caused the logout. Same for waybar.service.
 # `-s` also reports on non-system devices, e.g. a Bluetooth headset battery.
 exec poweralertd -s
 
