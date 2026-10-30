@@ -86,10 +86,18 @@
         // Reliable only because Slack runs as its own Chrome app window -- as a
         // tab, the title would be whatever tab happened to be in front.
         // Clicking toggles it, and launches it when it is not running.
+        //
+        // Right-click (or $mod+Shift+s) acknowledges the current count: the
+        // module goes quiet until the count rises above it. Slack's count also
+        // includes things reading a channel does not clear, so without this the
+        // bar can stay lit over items already seen. `webapp slack ack` sends
+        // RTMIN+10 so the change shows at once rather than on the next poll.
         "exec": "$HOME/.local/bin/slack waybar",
         "return-type": "json",
         "interval": 3,
-        "on-click": "$HOME/.local/bin/slack toggle"
+        "signal": 10,
+        "on-click": "$HOME/.local/bin/slack toggle",
+        "on-click-right": "$HOME/.local/bin/slack ack"
     },
 
     "custom/gmail": {

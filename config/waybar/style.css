@@ -437,6 +437,14 @@ window#waybar {
     color: #5c5c5c;
 }
 
+/* Mentions still waiting, but acknowledged (right-click, or $mod+Shift+s): the
+ * amber stays so it is not mistaken for a calm Slack, dimmed and without the
+ * number so it stops pulling at you. Same opacity as .gmail-stale. */
+#custom-slack.slack-acked {
+    color: #d79921;
+    opacity: 0.55;
+}
+
 /* Gmail (U+F0E0 fa-envelope). The same three states as Slack above, in the same
  * colours and for the same reasons, plus one modifier.
  *

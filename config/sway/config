@@ -325,6 +325,8 @@ bindsym $mod+r mode "resize"
     # back; launches it if it is not running. The app_id it matches on is set by
     # the for_window rule below.
     bindsym $mod+c exec ~/.local/bin/slack toggle
+    #: Slack: acknowledge the waiting mentions (bar goes quiet until a new one)
+    bindsym $mod+Shift+s exec ~/.local/bin/slack ack
 
     # Mail: Gmail and Google Calendar, tabbed on a workspace they share. The
     # first press starts BOTH -- a tabbed workspace with one tab is just a

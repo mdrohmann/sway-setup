@@ -1,7 +1,7 @@
 #!/bin/sh
 # Web apps on workspaces of their own: switch to one, and report what is waiting.
 #
-# Usage: webapp <app> [toggle|show|launch|waybar]
+# Usage: webapp <app> [toggle|show|launch|waybar|ack]
 #        apps: slack, gmail, calendar
 #
 # Each runs as a Chrome *app* window rather than a tab, which buys three things a
@@ -36,7 +36,8 @@
 # Icons are written as octal UTF-8 rather than as literal glyphs: they are
 # Private Use Area codepoints, and pasting those around tends to lose them
 # silently. Both are in the FontAwesome that waybar's font stack already names.
-app_config() {  # sets NAME, ID, URL, WS, CLS, HOT, ICON for $1
+app_config() {  # sets NAME, ID, URL, WS, CLS, HOT, ICON, SIG for $1
+    SIG=
     case "$1" in
         slack)
             NAME=Slack
@@ -44,6 +45,7 @@ app_config() {  # sets NAME, ID, URL, WS, CLS, HOT, ICON for $1
             URL=https://app.slack.com/client
             WS=slack
             CLS=slack; HOT=slack-mention
+            SIG=10                              # custom/slack's waybar signal
             ICON=$(printf '\357\206\230')       # U+F198 fa-slack
             ;;
         gmail)
@@ -282,8 +284,15 @@ unread_of() {  # app, title
 # --- commands ---------------------------------------------------------------
 APP=$1
 app_config "$APP" \
-    || { echo "usage: webapp <slack|gmail|calendar> [toggle|show|launch|waybar]" >&2
+    || { echo "usage: webapp <slack|gmail|calendar> [toggle|show|launch|waybar|ack]" >&2
          exit 1; }
+
+# Per-session state, under $XDG_RUNTIME_DIR so it dies with the session -- a
+# count remembered across a reboot would be a lie. STATE is the last count the
+# title reported (see the waybar branch), ACK the count you acknowledged with
+# `ack`.
+STATE="${XDG_RUNTIME_DIR:-/tmp}/webapp-$APP.count"
+ACK="${XDG_RUNTIME_DIR:-/tmp}/webapp-$APP.ack"
 
 case "${2:-toggle}" in
     launch)
@@ -324,6 +333,24 @@ case "${2:-toggle}" in
         [ -n "$con" ] && swaymsg "[con_id=$con] focus" >/dev/null 2>&1
         ;;
 
+    ack)
+        # "I have seen these." Records the count the bar last showed; the waybar
+        # branch below then keeps the module quiet until the count goes ABOVE
+        # it. Slack's "N new items" also counts things reading a channel does
+        # not clear (Activity entries, Later reminders), so without this the bar
+        # could stay lit for hours over items you have already looked at.
+        #
+        # Read from the poll's cache rather than from the title, so what gets
+        # acknowledged is exactly the number on screen, stale Gmail counts
+        # included. Nothing cached means nothing shown, so nothing to do.
+        n=$(cat "$STATE" 2>/dev/null)
+        case "$n" in ''|*[!0-9]*) exit 0 ;; esac
+        printf '%s\n' "$n" > "$ACK.$$" && mv -f "$ACK.$$" "$ACK"
+        # Redraw now instead of on the next 3s poll -- a key press that seems to
+        # do nothing gets pressed again. RTMIN+$SIG is the module's "signal".
+        [ -n "$SIG" ] && pkill -RTMIN+"$SIG" -x waybar
+        ;;
+
     waybar)
         title=$(title_of "$APP")
         n=$(unread_of "$APP" "$title")
@@ -336,11 +363,8 @@ case "${2:-toggle}" in
         # workspace button visible at all, so a blank would make a waiting inbox
         # invisible. Show the remembered number instead, tagged stale.
         #
-        # Under $XDG_RUNTIME_DIR so it dies with the session -- a count
-        # remembered across a reboot would be a lie. Written via a temp file and
-        # mv, like claude-sessions' SEEN, so a poll killed mid-write cannot leave
-        # a truncated number behind.
-        STATE="${XDG_RUNTIME_DIR:-/tmp}/webapp-$APP.count"
+        # Written via a temp file and mv, like claude-sessions' SEEN, so a poll
+        # killed mid-write cannot leave a truncated number behind.
         stale=
         if [ -n "$n" ]; then
             printf '%s\n' "$n" > "$STATE.$$" && mv -f "$STATE.$$" "$STATE"
@@ -369,9 +393,27 @@ case "${2:-toggle}" in
         # open the inbox; disabling would hide mail that really is waiting. Gmail
         # rewrites its title back to "Inbox (N)" whenever you return to the list,
         # so leaving the flag alone lets it heal itself.
+        # Acknowledged: quiet while the count is at or below what `ack` saw.
+        # Ratcheted DOWN as the count falls, so with 3 acknowledged and 2 left,
+        # one new mention (back to 3) still counts as new. Cleared at zero, so
+        # the next unread after an empty inbox lights up as usual. A stale count
+        # changes nothing here: it is the same number `ack` already saw.
+        acked=
+        a=$(cat "$ACK" 2>/dev/null)
+        case "$a" in ''|*[!0-9]*) a= ;; esac
+        if [ -n "$a" ]; then
+            if [ "$n" -eq 0 ] && [ -n "$title" ]; then
+                rm -f "$ACK"
+            elif [ "$n" -le "$a" ]; then
+                acked=1
+                [ "$n" -lt "$a" ] &&
+                    printf '%s\n' "$n" > "$ACK.$$" && mv -f "$ACK.$$" "$ACK"
+            fi
+        fi
+
         con=$(find_con "$APP")
         if [ -n "$con" ] && [ -z "$stale" ] && [ "$(current_ws)" != "$WS" ]; then
-            if [ "$n" -gt 0 ]; then
+            if [ "$n" -gt 0 ] && [ -z "$acked" ]; then
                 swaymsg "[con_id=$con] urgent enable"  >/dev/null 2>&1
             else
                 swaymsg "[con_id=$con] urgent disable" >/dev/null 2>&1
@@ -379,6 +421,7 @@ case "${2:-toggle}" in
         fi
 
         if   [ -z "$title" ] ; then cls="$CLS-gone";  txt="$ICON"
+        elif [ -n "$acked" ] ; then cls="$CLS-acked"; txt="$ICON"
         elif [ "$n" -gt 0 ]  ; then cls="$HOT";       txt="$ICON $n"
         else                        cls="$CLS-quiet"; txt="$ICON"
         fi
@@ -386,6 +429,8 @@ case "${2:-toggle}" in
         tip=${title:-$NAME is not running}
         [ -n "$stale" ] && tip="$tip
 $n unread, as of the last inbox view"
+        [ -n "$acked" ] && tip="$tip
+$n acknowledged -- lights up again when something new arrives"
 
         # Built with jq, not printf: the title goes into a JSON string verbatim
         # and email subject lines routinely contain quotes and backslashes. The
@@ -403,7 +448,7 @@ $n unread, as of the last inbox view"
         ;;
 
     *)
-        echo "usage: webapp <slack|gmail|calendar> [toggle|show|launch|waybar]" >&2
+        echo "usage: webapp <slack|gmail|calendar> [toggle|show|launch|waybar|ack]" >&2
         exit 1
         ;;
 esac
