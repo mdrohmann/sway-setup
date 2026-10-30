@@ -62,6 +62,7 @@ opt   swaylock                swaylock        # 1.8.4-1, kept as a fallback
 # --- tray and session -----------------------------------------------------
 opt   network-manager-gnome   nm-applet       # 1.36.0-4ubuntu1
 opt   blueman                 blueman-applet  # 2.4.4-1build1
+req   mate-polkit             /usr/libexec/polkit-mate-authentication-agent-1  # 1.26.1-6, the polkit password dialog
 opt   poweralertd             poweralertd     # 0.3.0-1build1
 opt   policykit-1-gnome       pkexec          # 0.105-8build1
 # The indicator binary ships inside gammastep. There is no

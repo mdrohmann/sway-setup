@@ -466,8 +466,12 @@ exec wl-paste --type image --watch cliphist store
 #   exec blueman-applet
 #   exec pasystray
 exec nm-applet
-# Authentication dialogs for privileged GUI actions (NM VPN activation, etc).
-exec /usr/lib/policykit-1-gnome/polkit-gnome-authentication-agent-1
+# Authentication dialogs for privileged GUI actions (pkexec, NM VPN activation,
+# etc). MATE's agent rather than polkit-gnome: polkit-gnome 0.105 segfaulted
+# during fingerprint authentication, leaving no agent at all -- and pkexec's
+# terminal fallback cannot stand in for it, since polkit 127's socket-activated
+# helper fails it with "No session for cookie".
+exec /usr/libexec/polkit-mate-authentication-agent-1
 exec blueman-applet
 
 ### Power alerts #############################################################
