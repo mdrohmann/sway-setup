@@ -119,6 +119,7 @@ else
 
         case $kind in
             font) fc-list 2>/dev/null | grep -qi -- "$check" && continue ;;
+            py)   python3 -c "import $check" 2>/dev/null && continue ;;
             *)    command -v "$check" >/dev/null 2>&1 && continue ;;
         esac
 

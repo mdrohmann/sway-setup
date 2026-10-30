@@ -1,0 +1,337 @@
+#!/usr/bin/env python3
+"""Time to your next meeting, for waybar -- and today's meetings, on click.
+
+Usage: meetings [waybar|menu|fetch]
+
+The calendar is Google Calendar's "secret address in iCal format": a private
+URL that serves the whole calendar as one .ics file, with no OAuth dance and
+no API client to register. It goes in ~/.config/meetings.conf -- NOT in this
+repo, since anyone holding it can read the calendar:
+
+    ICS_URL=https://calendar.google.com/calendar/ical/.../basic.ics
+
+Several ICS_URL lines are merged, for a second calendar.
+
+The file is fetched at most every REFRESH seconds, in the background, into
+~/.cache/meetings/. The waybar path only ever reads that cache: a slow or
+offline network costs a stale countdown, never a hung bar. Countdowns are
+computed from the cache on every poll, so they keep ticking between fetches.
+
+Recurring meetings are why this is not standard library only. Expanding RRULE,
+EXDATE and moved single instances (RECURRENCE-ID) by hand is exactly where a
+home-grown parser shows you a standup on the day it was cancelled; the
+recurring-ical-events package does that properly, on top of icalendar.
+"""
+
+import datetime as dt
+import html
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+
+HOME = os.path.expanduser("~")
+CONF = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.join(HOME, ".config"),
+                    "meetings.conf")
+CACHE_DIR = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.join(HOME, ".cache"),
+                         "meetings")
+REFRESH = 300
+
+# U+F073 fa-calendar, written as an escape for the reason webapp gives:
+# Private Use Area glyphs get lost when pasted around.
+ICON = ""
+
+# A meeting that started this recently still counts as the one to look at: you
+# are either in it or late for it, and either way the next one can wait.
+GRACE = dt.timedelta(minutes=10)
+
+
+def notify(summary, body):
+    subprocess.run(["notify-send", "-a", "meetings", "-u", "low",
+                    "-h", "string:x-dunst-stack-tag:meetings", summary, body],
+                   capture_output=True)
+
+
+def urls():
+    try:
+        with open(CONF) as f:
+            return [line.split("=", 1)[1].strip() for line in f
+                    if line.strip().startswith("ICS_URL=")]
+    except OSError:
+        return []
+
+
+def cache_path(i):
+    return os.path.join(CACHE_DIR, f"{i}.ics")
+
+
+# --- fetching ---------------------------------------------------------------
+def fetch():
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    ok = True
+    for i, url in enumerate(urls()):
+        try:
+            with urllib.request.urlopen(url, timeout=30) as r:
+                data = r.read()
+        except (OSError, ValueError):
+            ok = False
+            continue
+        # Atomic, so a poll never parses half a file.
+        fd, tmp = tempfile.mkstemp(dir=CACHE_DIR)
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.replace(tmp, cache_path(i))
+    # Stamped even on failure: an unreachable server is retried on the next
+    # REFRESH, not on every 30s poll.
+    with open(os.path.join(CACHE_DIR, "fetched"), "w") as f:
+        f.write("ok\n" if ok else "failed\n")
+    return ok
+
+
+def fetched_at():
+    try:
+        return os.path.getmtime(os.path.join(CACHE_DIR, "fetched"))
+    except OSError:
+        return 0
+
+
+def fetch_failed():
+    try:
+        with open(os.path.join(CACHE_DIR, "fetched")) as f:
+            return f.read().strip() == "failed"
+    except OSError:
+        return False
+
+
+# Kicked off from the poll and left to run on its own, so the poll returns at
+# once. The stamp is touched first, so the next poll does not start a second
+# fetch while this one is still downloading.
+def refresh_in_background():
+    if time.time() - fetched_at() < REFRESH:
+        return
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    try:
+        os.utime(os.path.join(CACHE_DIR, "fetched"))
+    except OSError:
+        open(os.path.join(CACHE_DIR, "fetched"), "w").close()
+    subprocess.Popen([os.path.abspath(__file__), "fetch"], start_new_session=True,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+# --- parsing ----------------------------------------------------------------
+class Meeting:
+    def __init__(self, title, start, end, all_day, declined, link):
+        self.title, self.start, self.end = title, start, end
+        self.all_day, self.declined, self.link = all_day, declined, link
+
+
+# A video link, best source first: Google's own conference property, then a
+# URL in the location, then the first meeting-looking URL in the description.
+MEET_URL = re.compile(r"https://(?:meet\.google\.com|[\w.-]*zoom\.us|teams\.microsoft\.com)/[^\s\"<>\\]+")
+
+
+def link_of(ev):
+    conf = str(ev.get("X-GOOGLE-CONFERENCE") or "")
+    if conf.startswith("http"):
+        return conf
+    for field in ("LOCATION", "DESCRIPTION"):
+        m = MEET_URL.search(str(ev.get(field) or ""))
+        if m:
+            return m.group(0)
+    return ""
+
+
+# Whether YOU declined. The calendar's own address is its X-WR-CALNAME for a
+# primary Google calendar, which is what the secret address serves.
+def declined(ev, me):
+    if not me:
+        return False
+    att = ev.get("ATTENDEE")
+    for a in att if isinstance(att, list) else [att] if att else []:
+        if str(a).lower().removeprefix("mailto:") == me:
+            return str(a.params.get("PARTSTAT", "")).upper() == "DECLINED"
+    return False
+
+
+def today():
+    """Today's meetings, sorted, or None when no calendar is configured or
+    nothing has been fetched yet."""
+    import icalendar
+    import recurring_ical_events
+
+    now = dt.datetime.now().astimezone()
+    day0 = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    day1 = day0 + dt.timedelta(days=1)
+    n = len(urls())
+    paths = [cache_path(i) for i in range(n) if os.path.exists(cache_path(i))]
+    if not paths:
+        return None
+    out = []
+    for p in paths:
+        try:
+            with open(p, "rb") as f:
+                cal = icalendar.Calendar.from_ical(f.read())
+        except (OSError, ValueError):
+            continue
+        me = str(cal.get("X-WR-CALNAME") or "").lower()
+        me = me if "@" in me else ""
+        for ev in recurring_ical_events.of(cal).between(day0, day1):
+            if str(ev.get("STATUS") or "").upper() == "CANCELLED":
+                continue
+            s = ev.decoded("DTSTART")
+            e = ev.decoded("DTEND") if ev.get("DTEND") else None
+            all_day = not isinstance(s, dt.datetime)
+            if all_day:
+                s = dt.datetime.combine(s, dt.time(), now.tzinfo)
+                e = dt.datetime.combine(e, dt.time(), now.tzinfo) if e else s + dt.timedelta(days=1)
+            else:
+                # A floating time (no TZID) is local time, by the RFC.
+                s = s.astimezone() if s.tzinfo else s.replace(tzinfo=now.tzinfo)
+                e = (e.astimezone() if e.tzinfo else e.replace(tzinfo=now.tzinfo)) if e else s
+            out.append(Meeting(str(ev.get("SUMMARY") or "(no title)"), s, e, all_day,
+                               declined(ev, me), link_of(ev)))
+    out.sort(key=lambda m: (not m.all_day, m.start))
+    return out
+
+
+# The ones a countdown is about: timed, not declined. A "free" block (TRANSP)
+# is deliberately still counted -- Google marks plenty of real meetings that way.
+def countable(meetings):
+    return [m for m in meetings if not m.all_day and not m.declined]
+
+
+# --- formatting -------------------------------------------------------------
+def until(delta):
+    mins = max(0, int(delta.total_seconds() + 59) // 60)        # round up
+    if mins < 60:
+        return f"{mins}m"
+    return f"{mins // 60}h{mins % 60:02d}"
+
+
+def short(s, n=24):
+    return s if len(s) <= n else s[:n - 1] + "…"
+
+
+def relative(m, now):
+    if m.all_day:
+        return "all day"
+    if m.end <= now:
+        return "done"
+    if m.start <= now:
+        return f"now, {until(m.end - now)} left"
+    return f"in {until(m.start - now)}"
+
+
+# --- commands ---------------------------------------------------------------
+def cmd_waybar():
+    def emit(text, cls, tip):
+        print(json.dumps({"text": text, "class": [cls], "tooltip": tip},
+                         ensure_ascii=False, separators=(",", ":")))
+
+    if not urls():
+        emit(ICON, "meeting-error", f"No calendar: put ICS_URL=... in {CONF}")
+        return
+    refresh_in_background()
+    try:
+        meetings = today()
+    except ImportError:
+        emit(ICON, "meeting-error",
+             "Needs python3-icalendar and python3-recurring-ical-events")
+        return
+    if meetings is None:
+        emit(ICON, "meeting-none", "Fetching the calendar…")
+        return
+
+    now = dt.datetime.now().astimezone()
+    timed = countable(meetings)
+    # Just started and still running: you are in it or late for it.
+    current = next((m for m in timed if m.start <= now < m.end and now - m.start < GRACE), None)
+    upcoming = next((m for m in timed if m.start > now), None)
+
+    # The tooltip is the day at a glance, the same list the click opens.
+    tip = "\n".join(f"{m.start:%H:%M}  {html.escape(short(m.title, 40))}  "
+                    f"({'declined' if m.declined else relative(m, now)})"
+                    if not m.all_day else f"all day  {html.escape(short(m.title, 40))}"
+                    for m in meetings) or "No meetings today"
+    if fetch_failed():
+        tip += "\n\n(last fetch failed -- showing the cached calendar)"
+
+    if current:
+        emit(f"{ICON} now {html.escape(short(current.title))}", "meeting-now", tip)
+    elif upcoming:
+        left = upcoming.start - now
+        cls = ("meeting-imminent" if left <= dt.timedelta(minutes=2) else
+               "meeting-soon" if left <= dt.timedelta(minutes=15) else "meeting-later")
+        emit(f"{ICON} {until(left)} {html.escape(short(upcoming.title))}", cls, tip)
+    else:
+        emit(ICON, "meeting-none", tip)
+
+
+def cmd_menu():
+    try:
+        meetings = today()
+    except ImportError:
+        notify("Meetings", "Needs python3-icalendar and python3-recurring-ical-events")
+        return
+    if not meetings:
+        notify("Meetings", "No meetings today" if meetings is not None else "No calendar fetched yet")
+        return
+    now = dt.datetime.now().astimezone()
+
+    lines = []
+    for m in meetings:
+        when = "  all day   " if m.all_day else f"{m.start:%H:%M}–{m.end:%H:%M}"
+        rel = relative(m, now)
+        row = f"{when}  {rel:<16}  {html.escape(m.title)}"
+        if m.declined:
+            row += "  <i>declined</i>"
+        if m.link:
+            row += "  <i>video</i>"
+        # Past and declined meetings dimmed, the next live one coloured the
+        # same way the bar colours it.
+        if m.end <= now or m.declined:
+            row = f'<span foreground="#5c5c5c">{row}</span>'
+        elif not m.all_day and m.start <= now:
+            row = f'<span foreground="#fb4934">{row}</span>'
+        elif not m.all_day and m.start - now <= dt.timedelta(minutes=15):
+            row = f'<span foreground="#d79921">{row}</span>'
+        lines.append(row)
+
+    # The cursor starts on the first meeting not yet over.
+    sel = next((i for i, m in enumerate(meetings) if not m.all_day and m.end > now), 0)
+    try:
+        p = subprocess.run(["rofi", "-dmenu", "-i", "-markup-rows", "-format", "i",
+                            "-p", f"today, {now:%H:%M}", "-no-custom",
+                            "-selected-row", str(sel),
+                            "-mesg", "Enter opens the video link"],
+                           input="\n".join(lines) + "\n", capture_output=True, text=True)
+    except OSError:
+        return
+    pick = p.stdout.strip()
+    if p.returncode != 0 or not pick.isdigit() or int(pick) >= len(meetings):
+        return
+    m = meetings[int(pick)]
+    if m.link:
+        subprocess.Popen(["xdg-open", m.link], start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        notify(m.title, "No video link on this one")
+
+
+def main():
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "waybar"
+    if cmd == "fetch":
+        sys.exit(0 if fetch() else 1)
+    handler = {"waybar": cmd_waybar, "menu": cmd_menu}.get(cmd)
+    if not handler:
+        print("usage: meetings [waybar|menu|fetch]", file=sys.stderr)
+        sys.exit(1)
+    handler()
+
+
+if __name__ == "__main__":
+    main()

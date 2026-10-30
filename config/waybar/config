@@ -11,7 +11,7 @@
 
     "modules-left": ["sway/workspaces", "sway/mode"],
     "modules-center": [],
-    "modules-right": ["custom/pomodoro", "custom/claude", "custom/slack", "custom/gmail",
+    "modules-right": ["custom/meetings", "custom/pomodoro", "custom/claude", "custom/slack", "custom/gmail",
                       "privacy",
                       "cpu", "memory", "temperature", "bluetooth",
                       "custom/night-light", "custom/dnd", "tray",
@@ -26,6 +26,22 @@
     "sway/mode": {
         // Shows "resize" while you're in the resize binding mode.
         "format": "{}"
+    },
+
+    "custom/meetings": {
+        // Time to the next meeting, and its title; "now" for one that started
+        // in the last ten minutes, since you are in it or late for it. Hover
+        // for the day's list, click for the same list in rofi, where Enter
+        // opens the meeting's video link. Logic in ~/.local/bin/meetings; the
+        // calendar's secret iCal address lives in ~/.config/meetings.conf,
+        // outside this repo.
+        //
+        // The poll never touches the network: it reads a cached .ics and
+        // starts a background fetch when that is over five minutes old.
+        "exec": "$HOME/.local/bin/meetings waybar",
+        "return-type": "json",
+        "interval": 30,
+        "on-click": "$HOME/.local/bin/meetings menu"
     },
 
     "custom/pomodoro": {

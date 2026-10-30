@@ -5,6 +5,8 @@
 # kind:  req   the desktop does not work without it
 #        opt   something degrades, but the rest is fine
 #        font  checked with fc-list, not command -v
+#        py    a Python module, checked with `python3 -c "import <module>"`;
+#              it counts as optional
 #
 # install.sh reads this file to report what is missing and to build the apt
 # line it prints. It never installs anything.
@@ -27,9 +29,11 @@ req   waybar                  waybar          # 0.15.0-1
 req   foot                    foot            # 1.25.0-1, arrives via sway
 req   wmenu                   wmenu-run       # 0.2.0-1, arrives via sway
 req   rofi                    rofi            # 2.0.0-0.2
+req   fzf                     fzf             # 0.74.1, the $mod+g Claude session picker
 req   jq                      jq              # 1.8.1-4ubuntu2, every sh script uses it
 req   python3                 python3         # 3.14, claude-sessions; ships with Ubuntu
-req   fzf                     fzf             # 0.74.1, the $mod+g Claude session picker
+py    python3-icalendar       icalendar       # 6.3.1-2, meetings
+py    python3-recurring-ical-events recurring_ical_events  # 3.8.0+dfsg-1, meetings
 
 # --- notifications --------------------------------------------------------
 req   dunst                   dunstctl        # 1.12.2-1build1

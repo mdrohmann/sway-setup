@@ -392,6 +392,29 @@ window#waybar {
     color: #5c5c5c;
 }
 
+/* Next meeting (U+F073 fa-calendar). White while it is a while off, the
+ * warning amber inside fifteen minutes, red from two minutes out until ten
+ * minutes in -- the stretch where you should be in it. Grey with nothing left
+ * today, and also when there is no calendar to read; the tooltip says which. */
+#custom-meetings {
+    padding: 0 8px;
+    color: #ffffff;
+}
+
+#custom-meetings.meeting-soon {
+    color: #d79921;
+}
+
+#custom-meetings.meeting-imminent,
+#custom-meetings.meeting-now {
+    color: #fb4934;
+}
+
+#custom-meetings.meeting-none,
+#custom-meetings.meeting-error {
+    color: #5c5c5c;
+}
+
 /* Slack (U+F198 fa-slack). White while running and quiet, like every other
  * always-present module here; the warning amber when something is addressed to
  * you; the inactive grey only when Slack is not running, the same way
