@@ -4,14 +4,14 @@
 # Usage: foot-theme [toggle|light|dark]
 #
 # foot loads BOTH colour sections at startup and swaps between them on a
-# signal -- USR1 selects [colors] (Solarized Dark, its default), USR2 selects
-# [colors2] (Solarized Light). It never re-reads the file and offers no way to
+# signal -- USR1 selects [colors-dark] (Solarized Dark, its default), USR2 selects
+# [colors-light] (Solarized Light). It never re-reads the file and offers no way to
 # ask which section a terminal is currently showing, so the only thing this
 # script adds is remembering that: without it there is nothing to toggle
 # against.
 #
 # One state file is enough because the signal goes to every foot at once. A
-# terminal opened afterwards still starts on [colors], so it comes up dark
+# terminal opened afterwards still starts on [colors-dark], so it comes up dark
 # while the rest are light -- the next toggle brings them back into agreement.
 #
 # Two caveats inherited from foot, both documented in config/foot/foot.ini:
