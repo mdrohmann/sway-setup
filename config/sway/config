@@ -337,11 +337,12 @@ bindsym $mod+r mode "resize"
     bindsym $mod+m exec ~/.local/bin/webapp gmail toggle
 
     # Jump to a Claude Code session by name -- see ~/.local/bin/claude-sessions.
-    # Lists every live session with whether it is working or waiting on you, and
-    # focuses the terminal hosting the one you pick (including through tmux and
-    # through herdr, where it also walks herdr to the right pane). Rows lead with
-    # the WINDOW's name, so this picker and $mod+o agree on what everything is
-    # called -- for a herdr pane that is the workspace label.
+    # Lists every live session, most recently prompted first, with whether it is
+    # working or waiting on you, and focuses the one you pick (through tmux, and
+    # through herdr down to the right pane). A herdr row leads with its
+    # "workspace › tab" labels. It is fzf in a floating foot, whose preview pane
+    # shows the highlighted session's last prompt and the agent's last reply.
+    # Pressing it again while open closes it.
     bindsym $mod+g exec ~/.local/bin/claude-sessions menu
 
     # Every binding in this file, with its description, in a rofi picker -- see
@@ -553,6 +554,9 @@ for_window [app_id="^chrome-mail\.google\.com__"] \
 for_window [app_id="^chrome-calendar\.google\.com__"] \
     border pixel 1, move to workspace mail, layout tabbed
 
+# The $mod+g session picker. Its size comes from foot's --window-size-chars,
+# not from a resize here, so there is nothing for a for_window resize to race.
+for_window [app_id="^claude-picker$"] floating enable, move position center
 for_window [window_role="pop-up"] floating enable
 for_window [window_role="bubble"] floating enable
 for_window [window_role="dialog"] floating enable

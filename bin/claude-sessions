@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """List running Claude Code sessions and jump to the terminal hosting one.
 
-Usage: claude-sessions [list|menu|waybar]
+Usage: claude-sessions [list|menu|pick|waybar]
 
 Claude Code maintains ~/.claude/sessions/<PID>.json for every live session,
 carrying its name, cwd, sessionId and -- the useful part -- a `status` saying
@@ -203,9 +203,10 @@ class Pane:
     pane_id: str
     ws_id: str
     tab_id: str
-    # The workspace LABEL rides along because that -- not the terminal window,
-    # which every pane shares -- is what a herdr row is labelled with.
+    # The workspace and tab LABELS ride along because those -- not the terminal
+    # window, which every pane shares -- are what a herdr row is labelled with.
     ws_label: str
+    tab_label: str
     # The pane's title, and only when Claude Code wrote it: Claude Code prefixes
     # its terminal title with a marker (a spinner while it works, a static one
     # otherwise), which herdr keeps in terminal_title and removes from
@@ -214,6 +215,11 @@ class Pane:
     # nothing a row does not already show. Same reasoning as window_label: a
     # title is worth reading only while something is holding it steady.
     title: str
+    # The session herdr says is running in the pane, when it recognised one.
+    sid: str = ""
+
+    def label(self):
+        return f"{self.ws_label} › {self.tab_label}" if self.tab_label else self.ws_label
 
 
 CLAUDE_TITLE = re.compile("^[✳◐◑] ")
@@ -226,8 +232,50 @@ def herdr_json(*args):
         return {}
 
 
+# Every pane, labelled. One `pane list` plus one `workspace list` and one
+# `tab list` -- cheap enough to do whenever any row turns out to be in herdr.
+_herdr_list = None
+
+
+def herdr_list():
+    global _herdr_list
+    if _herdr_list is not None:
+        return _herdr_list
+    _herdr_list = []
+    if not os.access(HERDR, os.X_OK):
+        return _herdr_list
+    panes = (herdr_json("pane", "list").get("result") or {}).get("panes") or []
+    if not panes:
+        return _herdr_list
+    ws_labels = {w.get("workspace_id"): w.get("label") or ""
+                 for w in (herdr_json("workspace", "list").get("result") or {}).get("workspaces") or []}
+    tab_labels = {t.get("tab_id"): t.get("label") or ""
+                  for t in (herdr_json("tab", "list").get("result") or {}).get("tabs") or []}
+    for p in panes:
+        ws, tab = p.get("workspace_id") or "", p.get("tab_id") or ""
+        title = ""
+        if CLAUDE_TITLE.match(p.get("terminal_title") or ""):
+            title = truncate(p.get("terminal_title_stripped") or "")
+        sess = p.get("agent_session") or {}
+        _herdr_list.append((p, Pane(
+            p["pane_id"], ws, tab, ws_labels.get(ws) or ws, tab_labels.get(tab) or "",
+            title, (sess.get("value") or "") if sess.get("kind") == "id" else "")))
+    return _herdr_list
+
+
+# herdr tracks which agent session runs in each pane it recognises, so most rows
+# are placed by session id alone, with no process lookups at all.
+def herdr_for_sid(sid):
+    if not sid:
+        return None
+    for _, pane in herdr_list():
+        if pane.sid == sid:
+            return pane
+    return None
+
+
 # pid -> Pane, one entry per pid in a pane: its shell, and whatever is in the
-# foreground.
+# foreground. The fallback for a pane herdr did not recognise as an agent.
 _herdr_panes = None
 
 
@@ -236,26 +284,19 @@ def herdr_panes():
     if _herdr_panes is not None:
         return _herdr_panes
     _herdr_panes = {}
-    if not os.access(HERDR, os.X_OK):
-        return _herdr_panes
-    panes = (herdr_json("pane", "list").get("result") or {}).get("panes") or []
-    if not panes:
-        return _herdr_panes
-    labels = {w.get("workspace_id"): w.get("label") or ""
-              for w in (herdr_json("workspace", "list").get("result") or {}).get("workspaces") or []}
     # Which pid sits in which pane needs a process-info call PER pane. They are
     # started all at once and collected after, so the cost is one round trip,
     # not one per pane. A pane that has since closed answers with an "error"
     # instead of a process_info, and drops out on its own.
     procs = []
-    for p in panes:
+    for p, pane in herdr_list():
         try:
-            procs.append((p, subprocess.Popen(
+            procs.append((pane, subprocess.Popen(
                 [HERDR, "pane", "process-info", "--pane", p["pane_id"]],
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)))
         except OSError:
             pass
-    for p, proc in procs:
+    for pane, proc in procs:
         try:
             out, _ = proc.communicate(timeout=5)
             info = ((json.loads(out or "null") or {}).get("result") or {}).get("process_info")
@@ -264,16 +305,29 @@ def herdr_panes():
             continue
         if not info:
             continue
-        ws = p.get("workspace_id") or ""
-        title = ""
-        if CLAUDE_TITLE.match(p.get("terminal_title") or ""):
-            title = truncate(p.get("terminal_title_stripped") or "")
-        pane = Pane(p["pane_id"], ws, p.get("tab_id") or "", labels.get(ws) or ws, title)
         pids = [info.get("shell_pid")] + [f.get("pid") for f in info.get("foreground_processes") or []]
         for pid in pids:
             if pid is not None:
                 _herdr_panes.setdefault(pid, pane)
     return _herdr_panes
+
+
+def is_herdr_server(pid):
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            argv = f.read().split(b"\0")
+    except OSError:
+        return False
+    return os.path.basename(argv[0]) == b"herdr" and b"server" in argv[1:]
+
+
+# Whether a session runs inside herdr at all. Asked of the process tree, not of
+# herdr, so that a row in a plain terminal never touches the socket. This has to
+# come BEFORE the window walk: a herdr server started from a client inherits
+# that client's terminal as an ancestor, so plain ancestry "succeeds" -- and
+# labels every herdr row with the one foot window they are all seen through.
+def under_herdr(pid):
+    return any(is_herdr_server(p) for p in ancestry(pid))
 
 
 # Walk up until a parent is a process herdr knows about.
@@ -290,9 +344,8 @@ def herdr_for_ancestry(pid):
 # The window every herdr pane is seen through: the terminal a herdr CLIENT is
 # attached in. Found by comm rather than by walking clients like tmux does,
 # because herdr's socket API describes panes, not the terminals showing them.
-# The server is skipped by its argv -- it is detached, so it would fail to
-# resolve anyway, but a `herdr server` someone started in a foreground terminal
-# would otherwise hand back that terminal.
+# The server is skipped by its argv: it may be detached, or it may be a child of
+# the first client, and either way it is not the terminal you are looking at.
 _herdr_win = False      # False: not looked for yet. None: looked, not found.
 
 
@@ -364,35 +417,41 @@ class Session:
     host: str = ""
     win: tuple = None
     pane: Pane = None
+    # The last prompt you typed into it, from history.jsonl: ms and text.
+    prompted: int = 0
+    prompt: str = ""
     _resolved: bool = field(default=False, repr=False)
 
     def resolve(self):
-        # Order matters: plain ancestry is tried first because it is free, and
-        # it is also what keeps the herdr socket out of the picture for every
-        # row that does not need it.
+        # Order matters: herdr is asked only for rows whose process tree runs
+        # through a herdr server, which keeps the socket out of the picture for
+        # every row that does not need it -- but it is asked before the window
+        # walk, which would otherwise find the client's terminal (see
+        # under_herdr).
         if self._resolved:
             return
         self._resolved = True
         if self.tmux:
             self.host, self.win = "tmux", win_for_tmux(self.tmux)
             return
+        if under_herdr(self.pid):
+            self.pane = herdr_for_sid(self.sid) or herdr_for_ancestry(self.pid)
+            if self.pane:
+                self.host, self.win = "herdr", herdr_client_win()
+                return
         self.win = win_for_ancestry(self.pid)
         if self.win:
             self.host = "win"
-            return
-        self.pane = herdr_for_ancestry(self.pid)
-        if self.pane:
-            self.host, self.win = "herdr", herdr_client_win()
 
     def label(self):
         self.resolve()
-        # A herdr row is labelled with the WORKSPACE it sits in, not with the
-        # window: every pane is seen through the one terminal the client runs
-        # in, so its locked title would label every herdr row identically. The
-        # workspace label is also the name you gave it, which is the point of
-        # the column.
+        # A herdr row is labelled with the WORKSPACE and TAB it sits in, not
+        # with the window: every pane is seen through the one terminal the
+        # client runs in, so its locked title would label every herdr row
+        # identically. Those labels are also the names you gave them, which is
+        # the point of the column.
         if self.host == "herdr":
-            return self.pane.ws_label
+            return self.pane.label()
         if not self.win:
             return ""
         return window_label(self.win[1], self.win[2])
@@ -494,6 +553,35 @@ def enumerate_sessions():
     return out
 
 
+# Every prompt you type is appended to history.jsonl with its session id and a
+# timestamp, so one pass over that file says when each session was last talked
+# TO -- which is how you remember them, unlike statusUpdatedAt, which moves
+# whenever the agent does. Read only by the menu and list, never by waybar.
+HISTORY = os.path.join(HOME, ".claude", "history.jsonl")
+
+
+def attach_prompts(rows):
+    want = {r.sid: r for r in rows if r.sid}
+    try:
+        with open(HISTORY, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                try:
+                    h = json.loads(line)
+                except ValueError:
+                    continue
+                r = want.get(h.get("sessionId") if isinstance(h, dict) else None)
+                ts = int(h.get("timestamp") or 0) if r else 0
+                if r and ts >= r.prompted:
+                    r.prompted, r.prompt = ts, h.get("display") or ""
+    except OSError:
+        pass
+    # Most recently prompted first. A session you have not typed into yet
+    # (just opened, or its prompts predate history.jsonl's session ids) falls
+    # back to when it last changed state.
+    rows.sort(key=lambda r: -(r.prompted or r.supd))
+    return rows
+
+
 # --- transcript ------------------------------------------------------------
 def transcript_for(cwd, sid):
     if not sid:
@@ -557,6 +645,27 @@ def title_of(path):
     return ""
 
 
+# What the agent last said: its closing summary when it is done, its latest
+# narration while it works. Each content block is its own transcript line, so
+# the last line carrying text is the last thing it wrote -- tool calls and
+# thinking in between are skipped.
+def last_reply(path):
+    if not path:
+        return ""
+    for rec in last_records(path, b'"type":"assistant"'):
+        if not isinstance(rec, dict) or rec.get("type") != "assistant":
+            continue
+        content = (rec.get("message") or {}).get("content")
+        if not isinstance(content, list):
+            continue
+        texts = [c.get("text") or "" for c in content
+                 if isinstance(c, dict) and c.get("type") == "text"]
+        text = "\n".join(t for t in texts if t.strip())
+        if text:
+            return text.strip()
+    return ""
+
+
 # --- formatting ------------------------------------------------------------
 def truncate(s, n=40):
     return s if len(s) <= n else s[:n - 1] + "…"
@@ -584,15 +693,7 @@ def ctx_k(ctx):
     return f"{(ctx + 500) // 1000}k" if ctx is not None else ""
 
 
-# The menu is drawn with pango markup, so everything interpolated into a row has
-# to be escaped: an "&" in a cwd, a session name or a herdr workspace label would
-# otherwise swallow the rest of the line. Escape AFTER padding -- "&amp;" is five
-# columns wide to padw and one to rofi.
-def esc(s):
-    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-
-# The DISPLAY width, which is what rofi draws (its default font is "mono 12", so
+# The DISPLAY width, which is what the terminal draws (a monospace font, so
 # padding with spaces actually aligns): one "✳", or the "⑂" Claude Code
 # marks a forked session with, is one column; a wide CJK character is two; a
 # combining mark is none.
@@ -639,7 +740,7 @@ def focus(r):
 def cmd_list():
     now = int(time.time())
     print("STATUS\tWINDOW\tPID\tNAME\tCWD\tAGE\tCTX\tWHERE")
-    for r in enumerate_sessions():
+    for r in attach_prompts(enumerate_sessions()):
         r.resolve()
         # A tmux or herdr session whose client has gone resolves to no window,
         # but saying where it lives is still the useful half of the answer.
@@ -653,7 +754,7 @@ def cmd_list():
             where = "-"
         print("\t".join([
             r.status + ("/bg" if r.bg else ""), r.label() or "-", str(r.pid),
-            r.display_name(), short_cwd(r.cwd), human_age(now - r.supd // 1000),
+            r.display_name(), short_cwd(r.cwd), human_age(now - (r.prompted or r.supd) // 1000),
             ctx_k(context_of(r.transcript())), where]))
 
 
@@ -735,64 +836,116 @@ def cmd_waybar():
                       "class": [cls]}, ensure_ascii=False, separators=(",", ":")))
 
 
-def cmd_menu():
-    rows = enumerate_sessions()
-    if not rows:
-        notify("low", "Claude sessions", "None running", "claude-sessions", timeout=3000)
-        return
+# The picker is fzf in a floating foot rather than rofi, for one reason: fzf
+# has a preview pane that follows the cursor, and that is where a row's last
+# prompt and the agent's last reply go. rofi can only show a row, and a row is
+# too narrow to say where a conversation stands.
+#
+# $mod+g runs `menu`, which only opens the window -- or closes it, if it is
+# already up, so the key toggles. The window runs `pick`, which does the work.
+PICKER_APP_ID = "claude-picker"
 
-    # Resolved first, formatted second. The leading column is the WINDOW's name
-    # -- the thing you are actually picking, and the same string $mod+o shows --
-    # so no column width is known until every row has one.
+
+def cmd_menu():
+    try:
+        if subprocess.run(["swaymsg", f'[app_id="^{PICKER_APP_ID}$"] kill'],
+                          capture_output=True, timeout=5).returncode == 0:
+            return
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        subprocess.Popen(["foot", f"--app-id={PICKER_APP_ID}", "--title=claude",
+                          "--window-size-chars=170x42",
+                          os.path.abspath(__file__), "pick"],
+                         start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        notify("normal", "Claude sessions", "Could not start foot", "claude-sessions", timeout=4000)
+
+
+# 24-bit SGR, the same gruvbox shades the rofi menu used.
+def fg(hex_, s):
+    r, g, b = (int(hex_[i:i + 2], 16) for i in (1, 3, 5))
+    return f"\033[38;2;{r};{g};{b}m{s}\033[0m"
+
+
+def bold(s):
+    return f"\033[1m{s}\033[0m"
+
+
+DIM = "#7c6f64"
+
+
+def mark_of(r):
+    if r.rank == 1:
+        return fg("#8ec07c", "●"), "ready"
+    if r.rank == 2:
+        # `shell` shares a rank with `busy` but not a meaning -- nothing is
+        # running, the terminal is just showing a shell rather than the prompt.
+        return fg("#5c5c5c", "◐"), "shell" if r.status == "shell" else "working"
+    return fg("#d79921", "!"), r.status
+
+
+def preview_text(r, label, now):
+    out = [bold(label) + "  " + fg(DIM, short_cwd(r.cwd))]
+    _, word = mark_of(r)
+    out.append(fg(DIM, f"{word}" + (f" -- {r.waiting}" if r.waiting else "")
+                  + f", pid {r.pid}"))
+    if r.prompt:
+        out += ["", fg("#83a598", f"▸ last prompt, {human_age(now - r.prompted // 1000)} ago"),
+                r.prompt]
+    reply = last_reply(r.transcript())
+    if reply:
+        out += ["", fg("#83a598", "▸ agent"), reply]
+    return "\n".join(out) + "\n"
+
+
+def cmd_pick():
+    rows = attach_prompts(enumerate_sessions())
+    if not rows:
+        print("No Claude sessions running.")
+        time.sleep(1.5)
+        return
     now = int(time.time())
     rich = [(r, r.label() or "-", r.display_name(), context_of(r.transcript())) for r in rows]
     wl = max(width(label) for _, label, _, _ in rich) or 12
     wn = max(width(name) for _, _, name, _ in rich) or 12
 
+    # Previews are written up front, one file per row, so moving the cursor is
+    # a `cat` rather than a fresh run of this script.
+    tmp = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/tmp", f"claude-pick.{os.getpid()}")
+    os.makedirs(tmp, exist_ok=True)
     lines = []
-    for r, label, name, ctx in rich:
-        if r.rank == 1:
-            mark, word = '<span foreground="#8ec07c">●</span>', "ready"
-        elif r.rank == 2:
-            # `shell` shares a rank with `busy` but not a meaning -- nothing is
-            # running, the terminal is just showing a shell rather than the
-            # prompt. Cheap to say, and it explains the dim mark.
-            mark = '<span foreground="#5c5c5c">◐</span>'
-            word = "shell" if r.status == "shell" else "working"
-        else:
-            mark, word = '<span foreground="#d79921">!</span>', r.status
-        extra = esc(short_cwd(r.cwd))
-        if r.tmux:
-            extra += "  <i>tmux</i>"
-        if r.host == "herdr":
-            extra += "  <i>herdr</i>"
-        if r.bg:
-            extra += "  <i>bg</i>"
-        if r.waiting:
-            extra += f"  <i>{esc(r.waiting)}</i>"
-        ctxs = f"{ctx_k(ctx)} ctx" if ctx is not None else ""
-        # Pango markup must wrap the already-padded text: padding inside a tag
-        # still counts, but the label has to be padded before it is bolded or
-        # the trailing spaces land outside the column.
-        #
-        # The session's name sits one column right and dimmed: it is what
-        # `claude` calls itself and what a notification says. A DERIVED name
-        # shows the conversation's title instead (see display_name), and so
-        # does the notification, so the link holds either way.
-        lines.append(f'{mark} <b>{esc(padw(label, wl))}</b>  '
-                     f'<span foreground="#5c5c5c">{esc(padw(name, wn))}  '
-                     f'{word:<7} {human_age(now - r.supd // 1000):>6} '
-                     f'{ctxs:>8}  {extra}</span>')
-
-    # -format i returns the chosen INDEX, so nothing has to be parsed back out
-    # of a decorated display string.
     try:
-        p = subprocess.run(["rofi", "-dmenu", "-i", "-markup-rows", "-format", "i",
-                            "-p", "claude", "-no-custom"],
-                           input="\n".join(lines) + "\n", capture_output=True, text=True)
-    except OSError:
-        return
-    sel = p.stdout.strip()
+        for i, (r, label, name, ctx) in enumerate(rich):
+            with open(os.path.join(tmp, str(i)), "w") as f:
+                f.write(preview_text(r, label, now))
+            mark, word = mark_of(r)
+            # The age is since your last prompt -- the order the rows are in.
+            age = human_age(now - (r.prompted or r.supd) // 1000)
+            ctxs = f"{ctx_k(ctx)} ctx" if ctx is not None else ""
+            extra = short_cwd(r.cwd)
+            if r.host == "tmux":
+                extra += "  tmux"
+            if r.bg:
+                extra += "  bg"
+            # Field 1 is the row index, hidden by --with-nth; everything after
+            # it is what you see and what the filter matches.
+            lines.append(f"{i}\t{mark} {bold(padw(label, wl))}  "
+                         + fg(DIM, f"{padw(name, wn)}  {word:<7} {age:>4} {ctxs:>8}  {extra}"))
+        # The whole window, whatever FZF_DEFAULT_OPTS says about --height.
+        try:
+            p = subprocess.run(
+                ["fzf", "--height=100%", "--no-border", "--ansi", "--no-sort", "--layout=reverse", "--cycle",
+                 "--delimiter=\t", "--with-nth=2..", "--prompt=claude> ",
+                 "--info=inline-right", "--no-scrollbar",
+                 f"--preview=cat {tmp}/{{1}}", "--preview-window=down,50%,wrap,border-top"],
+                input="\n".join(lines) + "\n", stdout=subprocess.PIPE, text=True)
+        except OSError:
+            return
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    sel = p.stdout.split("\t", 1)[0]
     if p.returncode != 0 or not sel.isdigit() or int(sel) >= len(rows):
         return
     r = rows[int(sel)]
@@ -806,9 +959,10 @@ def cmd_menu():
 
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else "menu"
-    handler = {"list": cmd_list, "menu": cmd_menu, "waybar": cmd_waybar}.get(cmd)
+    handler = {"list": cmd_list, "menu": cmd_menu, "pick": cmd_pick,
+               "waybar": cmd_waybar}.get(cmd)
     if not handler:
-        print("usage: claude-sessions [list|menu|waybar]", file=sys.stderr)
+        print("usage: claude-sessions [list|menu|pick|waybar]", file=sys.stderr)
         sys.exit(1)
     handler()
 
