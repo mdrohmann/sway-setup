@@ -338,6 +338,13 @@ bindsym $mod+r mode "resize"
     #: Gmail and Google Calendar, tabbed on one workspace
     bindsym $mod+m exec ~/.local/bin/webapp gmail toggle
 
+    # Today's meetings -- see ~/.local/bin/meetings, the same list as clicking
+    # the bar's calendar module. The cursor starts on the meeting the bar is
+    # counting down to (or one that just started), so $mod+u then Enter
+    # opens its video link.
+    #: Meetings: today's list, Enter joins the next one
+    bindsym $mod+u exec ~/.local/bin/meetings menu
+
     # Jump to a Claude Code session by name -- see ~/.local/bin/claude-sessions.
     # Lists every live session, most recently prompted first, with whether it is
     # working or waiting on you, and focuses the one you pick (through tmux, and

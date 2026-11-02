@@ -32,7 +32,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import urllib.request
 
 HOME = os.path.expanduser("~")
 CONF = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.join(HOME, ".config"),
@@ -71,6 +70,8 @@ def cache_path(i):
 
 # --- fetching ---------------------------------------------------------------
 def fetch():
+    import urllib.request       # only here: it alone doubles the startup time
+
     os.makedirs(CACHE_DIR, exist_ok=True)
     ok = True
     for i, url in enumerate(urls()):
@@ -157,19 +158,52 @@ def declined(ev, me):
     return False
 
 
+# Parsing the .ics and expanding its recurrences takes a few hundred ms, which
+# the 30s poll does not mind but $mod+u does: the menu should be up the instant
+# the key is pressed. So the expanded day is kept in today.json, valid while
+# the date is the same and no .ics is newer than it.
+TODAY_CACHE = os.path.join(CACHE_DIR, "today.json")
+
+
 def today():
     """Today's meetings, sorted, or None when no calendar is configured or
     nothing has been fetched yet."""
-    import icalendar
-    import recurring_ical_events
-
     now = dt.datetime.now().astimezone()
-    day0 = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    day1 = day0 + dt.timedelta(days=1)
     n = len(urls())
     paths = [cache_path(i) for i in range(n) if os.path.exists(cache_path(i))]
     if not paths:
         return None
+    try:
+        with open(TODAY_CACHE) as f:
+            c = json.load(f)
+        if (c["date"] == now.date().isoformat() and c["paths"] == paths
+                and os.path.getmtime(TODAY_CACHE) >= max(map(os.path.getmtime, paths))):
+            return [Meeting(m["title"], dt.datetime.fromisoformat(m["start"]),
+                            dt.datetime.fromisoformat(m["end"]), m["all_day"],
+                            m["declined"], m["link"]) for m in c["meetings"]]
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    out = expand(paths, now)
+    try:
+        fd, tmp = tempfile.mkstemp(dir=CACHE_DIR)
+        with os.fdopen(fd, "w") as f:
+            json.dump({"date": now.date().isoformat(), "paths": paths,
+                       "meetings": [{"title": m.title, "start": m.start.isoformat(),
+                                     "end": m.end.isoformat(), "all_day": m.all_day,
+                                     "declined": m.declined, "link": m.link}
+                                    for m in out]}, f)
+        os.replace(tmp, TODAY_CACHE)
+    except OSError:
+        pass
+    return out
+
+
+def expand(paths, now):
+    import icalendar
+    import recurring_ical_events
+
+    day0 = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    day1 = day0 + dt.timedelta(days=1)
     out = []
     for p in paths:
         try:
@@ -301,8 +335,13 @@ def cmd_menu():
             row = f'<span foreground="#d79921">{row}</span>'
         lines.append(row)
 
-    # The cursor starts on the first meeting not yet over.
-    sel = next((i for i, m in enumerate(meetings) if not m.all_day and m.end > now), 0)
+    # The cursor starts on the meeting the bar is showing -- one that started
+    # in the last GRACE minutes, else the next to start -- so opening the menu
+    # and pressing Enter joins it.
+    timed = [(i, m) for i, m in enumerate(meetings) if not m.all_day and not m.declined]
+    sel = next((i for i, m in timed if m.start <= now < m.end and now - m.start < GRACE),
+               next((i for i, m in timed if m.start > now),
+                    next((i for i, m in timed if m.end > now), 0)))
     try:
         p = subprocess.run(["rofi", "-dmenu", "-i", "-markup-rows", "-format", "i",
                             "-p", f"today, {now:%H:%M}", "-no-custom",
