@@ -33,6 +33,10 @@ include /etc/sway/config-vars.d/*
 # /etc/sway/config.d/
 # output * bg /usr/share/backgrounds/sway/Sway_Wallpaper_Blue_1920x1080.png fill
 #
+# Wallpaper: a personal photo, so it lives outside the repo. hyprlock.conf
+# points at the same file. Missing, swaybg just leaves the plain grey.
+output * bg ~/.local/share/backgrounds/desktop.jpg fill
+#
 # Example configuration:
 #
 #   output HDMI-A-1 resolution 1920x1080 position 1920,0
