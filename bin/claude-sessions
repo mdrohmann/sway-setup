@@ -540,11 +540,14 @@ def enumerate_sessions():
         if r.kind == "bg" and r.job in hosts:
             continue
         r.bg = r.kind == "bg" or r.job in bg
-        # The status shown is the more urgent of the pair: while you are parked
-        # it is the bg job that is actually working, or actually blocked on a
-        # prompt, and that is the thing worth knowing.
+        # While you are parked it is the bg job that is actually working, or
+        # actually blocked on a prompt, so its status is the one shown. The
+        # host only wins when it is itself blocked on you. Taking the lower
+        # rank of the pair instead was wrong: a parked host sits at its idle
+        # prompt (rank 1), which outranked the bg job's busy (rank 2), so a
+        # job mid-turn showed as ready.
         b = bg.get(r.job) if r.kind != "bg" else None
-        if b and b.rank < r.rank:
+        if b and not (r.status == "waiting" and b.status != "waiting"):
             r.rank, r.status, r.waiting = b.rank, b.status, b.waiting
         out.append(r)
 
